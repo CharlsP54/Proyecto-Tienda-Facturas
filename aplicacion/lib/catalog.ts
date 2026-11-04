@@ -1,4 +1,5 @@
-import {calculatePriceReferences,validateInvoice,type ProductCandidate} from './calculations.ts';
+import {calculatePriceReferences,calculateInnerUnitCost,validateInvoice,productCostIssues,purchaseCostIssues,type InvoiceInput,type ProductCandidate} from './calculations.ts';
+import {suggestInnerContents} from './ocr.ts';
 
 type Row=Record<string,unknown>;
 const str=(value:unknown)=>value==null?'':String(value);
@@ -30,10 +31,25 @@ export async function latestPurchases(db:D1Database,productIds:string[],supplier
  const fields:Record<string,string>={documentId:'d.id',lineId:'p.line_id',number:'d.number',supplier:'d.supplier',seller:'d.seller',unitCost:'p.unit_cost',netUnitCost:'p.net_unit_cost',unitsPerPack:'p.units_per_pack',supplierCode:'p.supplier_code'};
  const columns=Object.entries(fields).map(([key,column])=>`CASE WHEN COUNT(*)=1 THEN MAX(${column}) ELSE MAX(CASE WHEN d.id=rc.document_id AND p.line_id=rc.line_id THEN ${column} END) END AS ${key}`).join(',');
  const result=await db.prepare(`WITH latest AS(SELECT p.product_id${scoped?',d.supplier_key':''},MAX(d.date) latest_date FROM document_products p JOIN documents d ON d.id=p.document_id WHERE ${where} AND d.status='confirmed' AND d.kind='invoice' GROUP BY p.product_id${scoped?',d.supplier_key':''}) SELECT p.product_id productId${scoped?',d.supplier_key supplierKey':''},latest.latest_date date,COUNT(*) candidates,${columns},MAX(rc.reason) referenceReason FROM latest JOIN document_products p ON p.product_id=latest.product_id JOIN documents d ON d.id=p.document_id AND d.date=latest.latest_date${scoped?' AND d.supplier_key=latest.supplier_key':''} LEFT JOIN reference_choices rc ON rc.product_id=p.product_id AND rc.reference_date=d.date WHERE d.status='confirmed' AND d.kind='invoice' GROUP BY p.product_id${scoped?',d.supplier_key':''},latest.latest_date`).bind(...params).all<Row>();
- for(const row of result.results){if(row.documentId&&row.unitCost!=null&&row.netUnitCost==null){const original=await db.prepare('SELECT data FROM documents WHERE id=?').bind(row.documentId).first<Row>();try{const line=validateInvoice(JSON.parse(str(original?.data))).lines.find(l=>l.id===row.lineId);row.netUnitCost=line?.netUnitCost??null;}catch{row.netUnitCost=null;}}}
+ const originals=new Map<string,InvoiceInput|null>();
+ for(const row of result.results){if(!row.documentId)continue;const documentId=str(row.documentId);if(!originals.has(documentId)){const original=await db.prepare('SELECT data FROM documents WHERE id=?').bind(documentId).first<Row>();try{originals.set(documentId,JSON.parse(str(original?.data)) as InvoiceInput);}catch{originals.set(documentId,null);}}
+  const original=originals.get(documentId),line=original?.lines?.find(line=>line.id===row.lineId);row.sourceLine=line;row.reviewIssues=line?purchaseCostIssues(line):['Falta la línea original para comprobar la unidad del costo.'];
+  if(row.unitCost!=null&&row.netUnitCost==null){try{row.netUnitCost=original?validateInvoice(original).lines.find(line=>line.id===row.lineId)?.netUnitCost??null:null;}catch{row.netUnitCost=null;}}
+ }
  return new Map(result.results.map(row=>[scoped?JSON.stringify([row.productId,row.supplierKey]):str(row.productId),row]));
 }
 export function purchaseSummary(product:Row,row?:Row){
- const references=calculatePriceReferences({unitCost:row?.unitCost==null?null:str(row.unitCost),netUnitCost:row?.netUnitCost==null?null:str(row.netUnitCost),salePrice:str(product.sale_price),base:'gross'});
- return {status:!row?'none':!row.documentId?'ambiguous':!references.baseCost?'pending':'ready',date:str(row?.date),candidates:Number(row?.candidates||0),documentId:str(row?.documentId),lineId:str(row?.lineId),number:str(row?.number),supplier:str(row?.supplier),seller:str(row?.seller),unitCost:references.baseCost,netUnitCost:row?.netUnitCost==null?null:str(row.netUnitCost),unitsPerPack:str(row?.unitsPerPack),referenceReason:str(row?.referenceReason),references};
+ const issues=[...productReview(product).issues,...(Array.isArray(row?.reviewIssues)?row.reviewIssues as string[]:[]),...(row?.sourceLine?productContentIssues(product,row.sourceLine as InvoiceInput['lines'][number]):[])],safe=issues.length===0;
+ const references=calculatePriceReferences({unitCost:!safe||row?.unitCost==null?null:str(row.unitCost),netUnitCost:!safe||row?.netUnitCost==null?null:str(row.netUnitCost),salePrice:str(product.sale_price),base:'gross'});
+ return {status:!safe?'pending':!row?'none':!row.documentId?'ambiguous':!references.baseCost?'pending':'ready',issues,date:str(row?.date),candidates:Number(row?.candidates||0),documentId:str(row?.documentId),lineId:str(row?.lineId),number:str(row?.number),supplier:str(row?.supplier),seller:str(row?.seller),unitCost:references.baseCost,netUnitCost:!safe||row?.netUnitCost==null?null:str(row.netUnitCost),unitsPerPack:str(row?.unitsPerPack),referenceReason:str(row?.referenceReason),references,inner:calculateInnerUnitCost(references.baseCost,!safe||row?.netUnitCost==null?null:str(row.netUnitCost),str(product.inner_units),str(product.inner_unit_label))};
+}
+export function productReview(product:Row){
+ const issues=[...productCostIssues({name:str(product.name),category:str(product.category),presentation:str(product.presentation),comparisonUnit:str(product.comparison_unit),unitsPerPack:str(product.units_per_pack),contentsMode:str(product.contents_mode),innerUnits:str(product.inner_units),innerUnitLabel:str(product.inner_unit_label)}),...productContentIssues(product,{description:str(product.presentation)})];
+ return {status:issues.length?'pending':'ready',issues};
+}
+/** Si el texto identifica el contenido de la misma presentación, debe coincidir con la ficha. */
+export function productContentIssues(product:Row,line:Pick<InvoiceInput['lines'][number],'description'|'sourceText'>){
+ const explicit=suggestInnerContents(line.description)||suggestInnerContents(line.sourceText||'');if(!explicit||aliasKey(str(product.comparison_unit))!==explicit.costUnit)return [];
+ if(product.contents_mode!=='multiple'||str(product.inner_units)!==explicit.quantity)return ['El documento indica '+explicit.quantity+' '+explicit.unitLabel+' por '+explicit.costUnit+', pero la ficha tiene otro contenido. Revisa la presentación antes de usar sus costos.'];
+ return [];
 }

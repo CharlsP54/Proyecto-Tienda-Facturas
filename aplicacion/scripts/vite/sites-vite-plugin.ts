@@ -176,18 +176,25 @@ export function sites({ mockAuth = true } = {}): Plugin {
       const hostingConfig = resolve(root, ".openai", "hosting.json");
       const drizzleSource = resolve(root, "drizzle");
 
-      await rm(outputDirectory, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 200,
-      });
+      try {
+        await rm(outputDirectory, {
+          recursive: true,
+          force: true,
+          maxRetries: 5,
+          retryDelay: 200,
+        });
+      } catch {
+        // Tolerancia a bloqueo transitorio de carpetas en Windows OneDrive
+      }
       await mkdir(outputDirectory, { recursive: true });
 
-      await cp(hostingConfig, resolve(outputDirectory, "hosting.json"));
+      await cp(hostingConfig, resolve(outputDirectory, "hosting.json"), {
+        force: true,
+      });
       if (await exists(drizzleSource)) {
         await cp(drizzleSource, resolve(outputDirectory, "drizzle"), {
           recursive: true,
+          force: true,
         });
       }
     },

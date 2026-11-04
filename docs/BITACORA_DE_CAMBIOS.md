@@ -4,6 +4,37 @@ Registro detallado de todo lo que se implementó, mejoró y modificó sobre la p
 
 ---
 
+## Revisión general · 04/11/2026 · Fichas pendientes, contenidos, decimales y paneles flotantes
+
+- Se incorporó `products.contents_mode` mediante migración aditiva 0008 y se actualizaron respaldos, tamaño y restauración. Un contenido interior ya configurado se conserva como múltiple; las fichas antiguas sin datos suficientes quedan pendientes, sin inventar valores.
+- Las validaciones compartidas exigen una unidad del costo y una presentación coherentes. Crear productos desde factura comprueba también los importes y conversiones. Confirmar una compra con ficha incompleta o con contenido distinto al explícito del documento se bloquea. Los registros históricos se conservan y sus costos incoherentes dejan de utilizarse como referencias.
+- Gemini y OCR conservan propuestas de presentación y contenido. Un rótulo explícito como «funda de 24 chupetes» puede proponer ambos niveles; `24X28` queda pendiente y nunca se multiplica para calcular recepción. Las propuestas contradictorias se dejan sin completar. Las cifras leídas y notas siguen disponibles para revisión.
+- Se muestran costos con máximo tres decimales, conservando las seis cifras internas y los precios originales del editor. Se impide sugerir venta cero por redondeo. La consulta de historial extrae la línea necesaria sin repetir la factura completa para cada compra moderna.
+- Proveedores e historial se muestran en paneles flotantes sin fondo que bloquee la lista; edición usa el mismo estilo. Se puede minimizar, expandir y cerrar; se conserva el control de respuestas tardías y de cambios sin guardar, incluida la vuelta desde ayuda.
+- Pruebas específicas de contenido, incoherencias, campos pendientes y precisión; lectura real de un PDF ficticio con Gemini separada de las pruebas simuladas. Ver [informe de esta revisión](REVISION_PRODUCTOS_2026-11-04.md).
+- Entrega instalada localmente: 143 pruebas generales y 11 locales aprobadas; compilaciones y migración verificadas. Ensayo previo y comparación real preservaron facturas, costos, cuentas, configuración y 47 archivos privados. Se completaron únicamente las tres presentaciones ya confirmadas por el propietario. La versión nueva funciona en el puerto local 4310; no se publicó Sites.
+
+---
+
+## Mejora visual · 04/11/2026 · Costos en columnas independientes
+
+- Productos separa **Costo de compra** y **Venta sugerida +25 %**, cada uno con columnas de presentación completa y unidad interior cuando hay un desglose configurado. Los importes se muestran a 20–22 px y la etiqueta «Por cajita / Por sobre» a 14 px; el costo por sobre deja de aparecer como nota pequeña debajo del costo de la cajita.
+- Se mantienen fecha y proveedor de la compra, venta actual opcional, filtros y acciones. Los productos sin configuración interior indican su estado; las columnas interiores se omiten si ningún resultado de la página tiene desglose. La tabla conserva encabezados asociados y ajuste para pantallas de computador más pequeñas.
+- Cambios limitados a `aplicacion/app/page.tsx` y `aplicacion/app/globals.css`; cálculo, almacenamiento y facturas permanecen iguales. `check`: 139 pruebas aprobadas; compilación compatible y local verificadas. Revisión visual en navegador integrado con datos ficticios, incluidos Ranchero y un producto sin compra. Evidencia: `outputs/presentaciones/columnas-costos.png`.
+
+---
+
+## Entrega · 04/11/2026 · Cantidad comprada, filtros y costo por contenido
+
+- Se eliminó la inferencia de unidades recibidas a partir de X12/X24/X144 en nombres comerciales. OCR local y Gemini conservan columnas de compra, conversión y explicación; UNI o cero cajas con una unidad producen factor 1. Las conversiones sin respaldo y las columnas contradictorias quedan pendientes. Un total de unidades de una caja no se multiplica por el factor por segunda vez.
+- Se separaron el subtotal neto y el total con IVA de cada fila. El método explícito de precisión hasta el subtotal reproduce precios de tres decimales, conserva los centavos y exige aceptación. Se comprueban las cifras impresas por separado y se mantienen los cálculos anteriores como modo predeterminado.
+- Productos incorpora búsqueda por categoría, filtro exacto y orden por compra reciente, alta reciente o nombre, antes de paginar. Se añadieron índices y dos columnas opcionales de contenido interior mediante `0007_reflective_sumo.sql`.
+- El catálogo y el panel de proveedores muestran costo por cajita y por sobre si se configura el contenido. La sugerencia textual de ocho sobres requiere guardar la ficha y nunca altera la conversión de las facturas. Respaldos nuevos y antiguos conservan compatibilidad.
+- Se añadieron regresiones de lectura, doble conversión, precisión, filtros, contenido interior, restauración y corrección inmutable de una maicena ficticia de $0,86. La prueba real de Gemini utilizó exclusivamente un PDF ficticio; no se enviaron originales ni catálogo del propietario.
+- Archivos principales: `aplicacion/lib/{calculations,ocr,gemini,server,catalog}.ts`, `aplicacion/app/{page.tsx,globals.css}`, esquema/migración y pruebas. Detalles, verificaciones y límites en [Cantidades y costos](CANTIDADES_Y_COSTOS_2026-11-04.md).
+
+---
+
 ## Entrega 2 — Continuidad del proyecto, entorno Windows y catálogo ampliado con códigos por proveedor y precios opcionales
 
 **Fecha:** 3 de noviembre de 2026

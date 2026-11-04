@@ -15,6 +15,11 @@ test('IVA mixto con ceros contradictorios: propone una solución exacta sin camb
 test('varias asignaciones con la misma base quedan ambiguas aunque coincidan los totales',()=>{
  const data=source();data.lines=[line('a','1','1'),line('b','1','1')];data.taxSummary=[{taxRate:'0',base:'1.00'},{taxRate:'15',base:'1.00'}];data.taxTotal='0.15';data.total='2.15';assert.equal(analyzeTaxDistribution(data).status,'ambiguous');assert.throws(()=>applyTaxDistribution(data),/única/);
 });
+test('el reparto conserva y comprueba también los totales impresos con IVA por fila',()=>{
+ const data=source();data.lines.forEach((line,index)=>line.grossLineTotal=['1.50','2.65','2.55'][index]);
+ assert.equal(analyzeTaxDistribution(data).status,'unique');const accepted=applyTaxDistribution(data);assert.equal(validateInvoice(accepted).valid,true);assert.equal(accepted.lines[1].grossLineTotal,'2.65');
+ data.lines[1].grossLineTotal='2.64';assert.equal(analyzeTaxDistribution(data).status,'mismatch');
+});
 test('el IVA total aislado y una base parcial nunca inventan las tarifas',()=>{
  const data=source();delete data.taxSummary;assert.equal(analyzeTaxDistribution(data).status,'missing');data.taxSummary=[{taxRate:'15',base:'4.52'}];assert.equal(analyzeTaxDistribution(data).status,'mismatch');assert.equal(analyzeTaxDistribution({...source(),kind:'delivery'}).status,'commercial');
 });

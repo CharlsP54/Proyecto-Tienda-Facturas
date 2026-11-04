@@ -1,7 +1,7 @@
 import { GeminiError, GEMINI_MODELS, geminiModel, sealGeminiKey, openGeminiKey, checkGeminiConnection, extractWithGemini, verifyGeminiReading, type GeminiConfig, type GeminiFile, type GeminiCatalogItem } from './gemini.ts';
-import { validateInvoice, parsePrintedTaxSummary, type InvoiceInput } from './calculations.ts';
+import { validateInvoice, parsePrintedTaxSummary, resolvePurchaseColumns, innerUnitCount, purchaseCostIssues, type InvoiceInput } from './calculations.ts';
 import { extractDocumentData } from './ocr.ts';
-import {aliasKey,productMatches,latestPurchases,purchaseSummary} from './catalog.ts';
+import {aliasKey,productMatches,latestPurchases,purchaseSummary,productReview,productContentIssues} from './catalog.ts';
 
 export type Identity = { userId: string; email: string; displayName: string };
 type Bindings = { DB?: D1Database; BUCKET?: R2Bucket; OWNER_EMAIL?: string; AI_CONFIG_SECRET?: string; AI_FETCH?: typeof fetch };
@@ -16,7 +16,7 @@ const BACKUP_VERSION = 2;
 const BACKUP_RETENTION = 30;
 const BACKUP_TEXT_COLUMNS: Record<typeof BACKUP_TABLES[number], string[]> = {
   suppliers: ['id', 'name', 'name_key', 'created_at'],
-  products: ['id', 'name', 'category', 'brand', 'content', 'barcode', 'presentation', 'comparison_unit', 'units_per_pack', 'tax_rate', 'sale_price', 'created_at', 'updated_at'],
+  products: ['id', 'name', 'category', 'brand', 'content', 'barcode', 'presentation', 'comparison_unit', 'units_per_pack', 'tax_rate', 'sale_price', 'inner_units', 'inner_unit_label', 'contents_mode', 'created_at', 'updated_at'],
   supplier_products: ['id', 'supplier_key', 'supplier_name', 'supplier_code', 'supplier_description', 'product_id', 'created_at', 'updated_at'],
   documents: ['id', 'kind', 'supplier', 'supplier_key', 'number', 'date', 'seller', 'total', 'data', 'validation', 'related_id', 'review_of', 'operation_id', 'update_token', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   product_aliases: ['id','supplier_key','supplier_name','description','description_key','product_id','document_id','confirmed_by','updated_at'],
@@ -52,6 +52,7 @@ function optionalPrice(value: unknown, label: string, max = 999999999) {
   const [whole, fraction = ''] = normalized.split('.');
   return `${BigInt(whole).toString()}.${fraction.padEnd(2, '0')}`;
 }
+function innerCount(value:unknown){try{return innerUnitCount(text(value??'','Unidades interiores',10));}catch(error){if(error instanceof ApiError)throw error;fail(400,error instanceof Error?error.message:'El contenido interior no es válido.');}}
 async function readLimited(request: Request, limit: number): Promise<Uint8Array> {
   if (Number(request.headers.get('content-length') || 0) > limit) fail(413, 'El archivo o formulario supera el límite permitido.');
   if (!request.body) return new Uint8Array();
@@ -93,6 +94,7 @@ function productRow(row: Row) {
     unitsPerPack: str(row.units_per_pack),
     taxRate: str(row.tax_rate),
     salePrice: str(row.sale_price),
+    innerUnits:str(row.inner_units),innerUnitLabel:str(row.inner_unit_label),contentsMode:str(row.contents_mode),review:productReview(row),
   };
 }
 function supplierProductRow(row: Row) {
@@ -198,29 +200,36 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
     if (request.method === 'GET' && parts[0] === 'state') {
       const search = (url.searchParams.get('search') || '').trim().slice(0, 200);
       const status = url.searchParams.get('status') || '';
+      const productCategory=text(url.searchParams.get('productCategory')||'','Categoría de búsqueda',120),productSort=url.searchParams.get('productSort')||'name';
+      if(!['name','name_desc','newest','recent_purchase'].includes(productSort))fail(400,'Selecciona un orden de productos válido.');
       if (status && !['draft', 'confirmed', 'cancelled', 'discarded'].includes(status)) fail(400, 'Selecciona un estado de documento válido.');
       const page = Math.max(1, Math.min(100000, Number.parseInt(url.searchParams.get('page') || '1') || 1));
       const offset = (page - 1) * 50; const like = '%' + search.replace(/[\\%_]/g, '\\$&') + '%';
       const docWhere = "(supplier LIKE ? ESCAPE '\\' OR number LIKE ? ESCAPE '\\' OR seller LIKE ? ESCAPE '\\')";
-      const productSearchWhere = "(name LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR barcode LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM supplier_products sp WHERE sp.product_id=products.id AND sp.supplier_code LIKE ? ESCAPE '\\'))";
+      const productSearchWhere = "(name LIKE ? ESCAPE '\\' OR category LIKE ? ESCAPE '\\' OR brand LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR barcode LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM supplier_products sp WHERE sp.product_id=products.id AND sp.supplier_code LIKE ? ESCAPE '\\'))";
+      const productConditions:string[]=[],productBindings:SqlParam[]=[];
+      if(search){productConditions.push(productSearchWhere);productBindings.push(like,like,like,like,like,like);}if(productCategory){productConditions.push('category=?');productBindings.push(productCategory==='__uncategorized__'?'':productCategory);}
+      const productWhere=productConditions.length?'WHERE '+productConditions.join(' AND '):'',recentJoin=productSort==='recent_purchase'?" LEFT JOIN (SELECT dp.product_id,MAX(d.date) recent_date FROM document_products dp JOIN documents d ON d.id=dp.document_id WHERE d.kind='invoice' AND d.status='confirmed' GROUP BY dp.product_id) latest_purchase ON latest_purchase.product_id=products.id ":'';
+      const productOrder=productSort==='recent_purchase'?'latest_purchase.recent_date DESC,products.created_at DESC,products.id':productSort==='newest'?'products.created_at DESC,products.id DESC':productSort==='name_desc'?'products.name DESC,products.id':'products.name,products.id';
       const documentConditions: string[] = []; const documentBindings: SqlParam[] = [];
       if (search) { documentConditions.push(docWhere); documentBindings.push(like, like, like); }
       if (status) { documentConditions.push('status=?'); documentBindings.push(status); }else documentConditions.push("status<>'discarded'");
       const documentWhere = documentConditions.length ? 'WHERE ' + documentConditions.join(' AND ') : '';
       const statements = [
         db.prepare(`SELECT * FROM documents ${documentWhere} ORDER BY updated_at DESC,id DESC LIMIT 50 OFFSET ?`).bind(...documentBindings, offset),
-        search ? db.prepare(`SELECT * FROM products WHERE ${productSearchWhere} ORDER BY name,id LIMIT 50 OFFSET ?`).bind(like, like, like, like, like, offset) : db.prepare('SELECT * FROM products ORDER BY name,id LIMIT 50 OFFSET ?').bind(offset),
+        db.prepare(`SELECT products.* FROM products ${recentJoin} ${productWhere} ORDER BY ${productOrder} LIMIT 50 OFFSET ?`).bind(...productBindings,offset),
         search ? db.prepare("SELECT * FROM suppliers WHERE name LIKE ? ESCAPE '\\' ORDER BY name LIMIT 50 OFFSET ?").bind(like, offset) : db.prepare('SELECT * FROM suppliers ORDER BY name LIMIT 50 OFFSET ?').bind(offset),
         db.prepare("SELECT (SELECT COUNT(*) FROM documents WHERE status<>'discarded') documents,(SELECT COUNT(*) FROM products) products,(SELECT COUNT(*) FROM suppliers) suppliers,(SELECT COUNT(*) FROM documents WHERE status='draft') pending,(SELECT COUNT(*) FROM documents WHERE status='confirmed') confirmed,(SELECT COUNT(*) FROM documents WHERE status='cancelled') cancelled,(SELECT COUNT(*) FROM documents WHERE status='discarded') discarded"),
         db.prepare(role === 'admin' ? 'SELECT email,role,active,created_at FROM members ORDER BY email' : 'SELECT email,role,active,created_at FROM members WHERE 0'),
         db.prepare(role === 'admin' ? 'SELECT * FROM audit ORDER BY created_at DESC,id LIMIT 100' : 'SELECT * FROM audit WHERE 0'),
         db.prepare(`SELECT COUNT(*) count FROM documents ${documentWhere}`).bind(...documentBindings),
-        search ? db.prepare(`SELECT COUNT(*) count FROM products WHERE ${productSearchWhere}`).bind(like, like, like, like, like) : db.prepare('SELECT COUNT(*) count FROM products'),
+        db.prepare(`SELECT COUNT(*) count FROM products ${productWhere}`).bind(...productBindings),
         search ? db.prepare("SELECT COUNT(*) count FROM suppliers WHERE name LIKE ? ESCAPE '\\'").bind(like) : db.prepare('SELECT COUNT(*) count FROM suppliers'),
         search ? db.prepare("SELECT * FROM supplier_products WHERE supplier_code LIKE ? ESCAPE '\\' OR supplier_name LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT 200").bind(like, like) : db.prepare('SELECT * FROM supplier_products ORDER BY updated_at DESC LIMIT 200'),
+        db.prepare("SELECT DISTINCT category FROM products WHERE category<>'' ORDER BY category LIMIT 501"),db.prepare("SELECT COUNT(DISTINCT category) count FROM products WHERE category<>''"),
       ];
       const results = await db.batch(statements);
-      const [docs, prods, supps, countsRows, membersRows, auditRows, documentTotals, productTotals, supplierTotals, supplierCodeRows] = results.map(result => result.results as Row[]);
+      const [docs, prods, supps, countsRows, membersRows, auditRows, documentTotals, productTotals, supplierTotals, supplierCodeRows,categoryRows,categoryCounts] = results.map(result => result.results as Row[]);
       const counts = countsRows[0], documentTotal = documentTotals[0], productTotal = productTotals[0], supplierTotal = supplierTotals[0];
       const latestCosts=await latestPurchases(db,prods.map(p=>str(p.id)));
       const lastBackup = await bucket.head(`backups/${timestamp.slice(0, 10)}.json`);
@@ -231,6 +240,7 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
         supplierProducts: supplierCodeRows.map(supplierProductRow),
         suppliers: supps,
         counts,
+        productCategories:categoryRows.slice(0,500).map(row=>str(row.category)),categoriesTruncated:Number(categoryCounts[0]?.count||0)>500,
         members: membersRows,
         audit: auditRows,
         pagination: { page, pageSize: 50, documents: Number(documentTotal?.count || 0), products: Number(productTotal?.count || 0), suppliers: Number(supplierTotal?.count || 0) },
@@ -314,6 +324,7 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
           if (!line.productId) fail(422, 'Relaciona cada línea con un producto antes de confirmar.');
           const product = await db.prepare('SELECT * FROM products WHERE id=?').bind(line.productId).first<Row>();
           if (!product) fail(422, 'Una línea hace referencia a un producto inexistente.');
+          if(input.kind==='invoice'){const issues=[...productReview(product).issues,...purchaseCostIssues(line),...productContentIssues(product,line)];if(issues.length)fail(422,'Producto «'+line.description+'» pendiente de revisión: '+issues.join(' '));}
           if (input.kind === 'invoice' && str(product.tax_rate) && line.taxRate && str(product.tax_rate) !== line.taxRate && !String(input.notes || '').trim()) fail(422, 'Un IVA difiere del registrado en el producto. Explica la revisión en las notas.');
           const lineCode = text(line.supplierCode ?? '', 'Código del proveedor', 100);
           if (input.kind === 'invoice' && lineCode) {
@@ -400,6 +411,10 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
     if (request.method === 'POST' && parts[0] === 'products') {
       const payload = await body(request);
       const productId = payload.id ? id(payload.id) : uuid();
+      const storedProduct=await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>();
+      const innerUnits=innerCount(payload.innerUnits??storedProduct?.inner_units??''),innerUnitLabel=text(payload.innerUnitLabel??storedProduct?.inner_unit_label??'','Nombre de la unidad interior',60);
+      const contentsMode=text(payload.contentsMode??storedProduct?.contents_mode??(innerUnits?'multiple':''),'Tipo de presentación',20);if(contentsMode&&!['single','multiple'].includes(contentsMode))fail(400,'Selecciona un tipo de presentación válido.');
+      if(!!innerUnits!==!!innerUnitLabel)fail(400,'Completa cuántas unidades interiores hay y cómo se llaman, o deja ambos datos vacíos.');
       const name = text(payload.name, 'Nombre del producto', 250, true);
       const category = text(payload.category ?? '', 'Categoría', 120);
       const brand = text(payload.brand ?? '', 'Marca', 150);
@@ -411,14 +426,19 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
       const tax = decimal(payload.taxRate, 'IVA', 100);
       const salePrice = optionalPrice(payload.salePrice, 'Precio de venta actual');
       if (units && Number(units) <= 0) fail(400, 'Las unidades por presentación deben ser mayores que cero.');
+      const proposedProduct={name,category,presentation,comparison_unit:comparisonUnit,units_per_pack:units,contents_mode:contentsMode,inner_units:innerUnits,inner_unit_label:innerUnitLabel};const productIssues=productReview(proposedProduct).issues;
+      if(payload.sourceDocumentId&&productIssues.length)fail(422,'Completa la ficha antes de publicar el producto: '+productIssues.join(' '));
       if(payload.sourceDocumentId){
         const documentId=id(payload.sourceDocumentId),source=await getDoc(documentId),expected=version(payload.sourceVersion),input=JSON.parse(str(source.data)) as InvoiceInput,line=input.lines.find(l=>l.id===payload.sourceLineId);
         if(source.status!=='draft'||source.version!==expected||!line||line.description.trim()!==name)fail(409,'La línea cambió. Revisa la factura antes de crear un artículo.');
+        if(productContentIssues(proposedProduct,line).length)fail(422,'El contenido de la ficha no coincide con el contenido explícito de la factura.');
+        const arithmetic=validateInvoice({...input,lines:input.lines.map((item,index)=>({...item,productId:item.productId||'revision-'+index}))});if(!arithmetic.valid)fail(422,'La factura tiene valores pendientes o incoherentes. Revisa sus cálculos antes de publicar productos.');
+        if(input.lines.some(item=>purchaseCostIssues(item).length))fail(422,'Hay conversiones de compra pendientes en la factura. Revísalas antes de publicar productos.');
         const existing=await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>();if(existing)return json({product:productRow(existing),replayed:true});
         const matches=await productMatches(db,input.supplier,line.description,line.supplierCode||'');
         if((matches.length||line.productCandidates?.length)&&(!line.newProductAcknowledged||!String(line.identityNote||'').trim()))fail(409,'Hay productos del catálogo que podrían ser este artículo. Vincúlalo o explica por qué es un producto distinto antes de crearlo.');
         const guard="EXISTS(SELECT 1 FROM documents WHERE id=? AND version=? AND status='draft')",same="NOT EXISTS(SELECT 1 FROM products WHERE lower(trim(name))=? AND lower(trim(brand))=? AND lower(trim(content))=?)";
-        const result=await db.batch([db.prepare(`INSERT OR IGNORE INTO products(id,name,category,brand,content,barcode,presentation,comparison_unit,units_per_pack,tax_rate,sale_price,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${guard} AND (? OR ${same})`).bind(productId,name,category,brand,content,barcode,presentation,comparisonUnit,units,tax,salePrice,timestamp,timestamp,documentId,expected,line.newProductAcknowledged?1:0,normalize(name),normalize(brand),normalize(content)),db.prepare(`INSERT INTO audit(id,document_id,actor,action,detail,created_at) SELECT ?,?,?,'product_created_from_invoice',?,? WHERE EXISTS(SELECT 1 FROM products WHERE id=? AND created_at=?) AND ${guard}`).bind(uuid(),documentId,email,name+(line.identityNote?' · Artículo distinto: '+text(line.identityNote,'Motivo de identidad',500):''),timestamp,productId,timestamp,documentId,expected)]);
+        const result=await db.batch([db.prepare(`INSERT OR IGNORE INTO products(id,name,category,brand,content,barcode,presentation,comparison_unit,units_per_pack,tax_rate,sale_price,inner_units,inner_unit_label,contents_mode,created_at,updated_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${guard} AND (? OR ${same})`).bind(productId,name,category,brand,content,barcode,presentation,comparisonUnit,units,tax,salePrice,innerUnits,innerUnitLabel,contentsMode,timestamp,timestamp,documentId,expected,line.newProductAcknowledged?1:0,normalize(name),normalize(brand),normalize(content)),db.prepare(`INSERT INTO audit(id,document_id,actor,action,detail,created_at) SELECT ?,?,?,'product_created_from_invoice',?,? WHERE EXISTS(SELECT 1 FROM products WHERE id=? AND created_at=?) AND ${guard}`).bind(uuid(),documentId,email,name+(line.identityNote?' · Artículo distinto: '+text(line.identityNote,'Motivo de identidad',500):''),timestamp,productId,timestamp,documentId,expected)]);
         if(!result[0].meta.changes)fail(409,'El catálogo o la factura cambió. Revisa las coincidencias antes de crear otro artículo.');return saved({product:productRow((await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>())!)});
       }
       if (payload.id && await db.prepare('SELECT id FROM products WHERE id=?').bind(productId).first()) admin();
@@ -431,9 +451,9 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
       const twin = await db.prepare("SELECT name FROM products WHERE id<>? AND lower(trim(name))=? AND lower(trim(brand))=? AND lower(trim(content))=? AND lower(trim(presentation))=? LIMIT 1").bind(productId, normalize(name), normalize(brand), normalize(content), normalize(presentation)).first<Row>();
       if (twin) warnings.push(`Ya existe un producto con el mismo nombre, marca, contenido y presentación («${str(twin.name)}»). Comprueba que no sea un duplicado.`);
       await db.batch([
-        db.prepare('INSERT INTO products(id,name,category,brand,content,barcode,presentation,comparison_unit,units_per_pack,tax_rate,sale_price,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,brand=excluded.brand,content=excluded.content,barcode=excluded.barcode,presentation=excluded.presentation,comparison_unit=excluded.comparison_unit,units_per_pack=excluded.units_per_pack,tax_rate=excluded.tax_rate,sale_price=excluded.sale_price,updated_at=excluded.updated_at')
-          .bind(productId, name, category, brand, content, barcode, presentation, comparisonUnit, units, tax, salePrice, timestamp, timestamp),
-        auditStatement('product_saved', `${name}${salePrice ? ` · PVP tienda $${salePrice}` : ''}`),
+        db.prepare('INSERT INTO products(id,name,category,brand,content,barcode,presentation,comparison_unit,units_per_pack,tax_rate,sale_price,inner_units,inner_unit_label,contents_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,category=excluded.category,brand=excluded.brand,content=excluded.content,barcode=excluded.barcode,presentation=excluded.presentation,comparison_unit=excluded.comparison_unit,units_per_pack=excluded.units_per_pack,tax_rate=excluded.tax_rate,sale_price=excluded.sale_price,inner_units=excluded.inner_units,inner_unit_label=excluded.inner_unit_label,contents_mode=excluded.contents_mode,updated_at=excluded.updated_at')
+          .bind(productId, name, category, brand, content, barcode, presentation, comparisonUnit, units, tax, salePrice, innerUnits, innerUnitLabel, contentsMode, timestamp, timestamp),
+        auditStatement('product_saved',JSON.stringify({name,before:storedProduct?{unit:str(storedProduct.comparison_unit),mode:str(storedProduct.contents_mode),count:str(storedProduct.inner_units),innerUnit:str(storedProduct.inner_unit_label)}:null,after:{unit:comparisonUnit,mode:contentsMode,count:innerUnits,innerUnit:innerUnitLabel},salePrice})),
       ]);
       return saved({ product: productRow((await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>())!), warnings });
     }
@@ -502,13 +522,15 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
       const product = await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>();
       if (!product) fail(404, 'No se encontró el producto.');
       const supplierCodes = await all('SELECT * FROM supplier_products WHERE product_id=? ORDER BY supplier_name,supplier_code LIMIT 200', productId);
-      const rows = await all("SELECT d.id,d.date,d.number,d.supplier,d.seller,d.total,d.data,p.line_id,p.unit_cost,p.net_unit_cost,p.units_per_pack,p.tax_rate,p.supplier_code,p.promotion FROM document_products p JOIN documents d ON d.id=p.document_id WHERE p.product_id=? AND d.status='confirmed' AND d.kind='invoice' ORDER BY d.date DESC,d.id,p.line_id LIMIT 1000", productId);
+      const rows = await all("SELECT d.id,d.date,d.number,d.supplier,d.seller,d.total,CASE WHEN p.net_unit_cost IS NULL OR p.units_per_pack='' THEN d.data ELSE '' END data,(SELECT j.value FROM json_each(CASE WHEN json_valid(d.data) THEN d.data ELSE '{}' END,'$.lines') j WHERE j.type='object' AND json_extract(CASE WHEN j.type='object' THEN j.value ELSE '{}' END,'$.id')=p.line_id LIMIT 1) source_line,p.line_id,p.unit_cost,p.net_unit_cost,p.units_per_pack,p.tax_rate,p.supplier_code,p.promotion FROM document_products p JOIN documents d ON d.id=p.document_id WHERE p.product_id=? AND d.status='confirmed' AND d.kind='invoice' ORDER BY d.date DESC,d.id,p.line_id LIMIT 1000", productId);
       const history = rows.map(row => {
         const lineId = str(row.line_id);
         let netUnitCost = row.net_unit_cost == null ? null : str(row.net_unit_cost);
         let unitsPerPack = str(row.units_per_pack);
         let taxRate = str(row.tax_rate);
         let supplierCode = str(row.supplier_code);
+        let issues=productReview(product).issues;
+        try{const source=row.source_line?JSON.parse(str(row.source_line)) as InvoiceInput['lines'][number]:null;issues=[...issues,...(source?[...purchaseCostIssues(source),...productContentIssues(product,source)]:['Falta comprobar la línea original.'])];}catch{issues=[...issues,'No se pudo comprobar el original de esta compra.'];}
         if ((netUnitCost === null && row.unit_cost !== null) || (!unitsPerPack && row.data)) {
           try {
             const parsed = JSON.parse(str(row.data)) as InvoiceInput;
@@ -532,8 +554,8 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
           supplier: str(row.supplier),
           seller: str(row.seller),
           total: str(row.total),
-          unitCost: row.unit_cost == null ? null : str(row.unit_cost),
-          netUnitCost,
+          unitCost: issues.length||row.unit_cost == null ? null : str(row.unit_cost),
+          netUnitCost:issues.length?null:netUnitCost,reviewIssues:issues,
           unitsPerPack,
           taxRate,
           supplierCode,
@@ -542,14 +564,15 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
         };
       });
       const warnings: string[] = [];
+      if(productReview(product).issues.length)warnings.push('Ficha pendiente de revisión: '+productReview(product).issues.join(' '));
       if (history.length >= 1000) warnings.push('Se muestran las 1.000 compras más recientes de este producto.');
       // Same-date ties are never resolved by upload order: an administrator must choose the reference with a reason.
       const latestDate = history.reduce((max, row) => row.date > max ? row.date : max, '');
       const tied = latestDate ? history.filter(row => row.date === latestDate) : [];
       const choiceRow = tied.length > 1 ? await db.prepare('SELECT * FROM reference_choices WHERE product_id=? AND reference_date=?').bind(productId, latestDate).first<Row>() : null;
-      const chosen = choiceRow ? tied.find(row => row.documentId === str(choiceRow.document_id) && row.lineId === str(choiceRow.line_id)) : undefined;
+      const chosen = choiceRow ? tied.find(row => row.unitCost!==null&&row.documentId === str(choiceRow.document_id) && row.lineId === str(choiceRow.line_id)) : undefined;
       const referenceChoice = chosen && choiceRow ? { documentId: chosen.documentId, lineId: chosen.lineId, reason: str(choiceRow.reason), chosenBy: str(choiceRow.chosen_by), createdAt: str(choiceRow.created_at) } : null;
-      if (tied.length > 1 && !referenceChoice) warnings.push('Hay varias compras en la fecha más reciente. Elige con un motivo cuál será la referencia; no se decide por el orden de carga.');
+      if (tied.length > 1 && !referenceChoice) warnings.push(tied.every(row=>row.unitCost===null)?'Las compras de la fecha más reciente están pendientes de revisión; todavía no hay un costo válido para elegir.':'Hay varias compras en la fecha más reciente. Elige con un motivo cuál será la referencia; no se decide por el orden de carga.');
       if (!(tied.length > 1) && history[0]?.unitCost === null) warnings.push('El documento más reciente tiene costo efectivo pendiente.');
       // Orders and delivery notes give identified provisional references only; they never enter the confirmed history.
       const productNeedle = `"productId":"${productId}"`;
@@ -570,8 +593,10 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
     if (request.method === 'POST' && parts[0] === 'reference-choices') {
       admin(); const payload = await body(request);
       const productId = id(payload.productId); const documentId = id(payload.documentId); const lineId = text(payload.lineId, 'Línea', 200, true); const reason = text(payload.reason, 'Motivo de la referencia', 1000, true);
+      const product=await db.prepare('SELECT * FROM products WHERE id=?').bind(productId).first<Row>();if(!product||productReview(product).issues.length)fail(422,'Completa la ficha del producto antes de elegir una referencia de costo.');
       const picked = await db.prepare("SELECT d.date,p.unit_cost FROM document_products p JOIN documents d ON d.id=p.document_id WHERE p.product_id=? AND p.document_id=? AND p.line_id=? AND d.status='confirmed' AND d.kind='invoice'").bind(productId, documentId, lineId).first<Row>();
       if (!picked) fail(404, 'Esa compra confirmada no existe para este producto.');
+      const source=JSON.parse(str((await getDoc(documentId)).data)) as InvoiceInput,sourceLine=source.lines.find(line=>line.id===lineId);if(!sourceLine||purchaseCostIssues(sourceLine).length||productContentIssues(product,sourceLine).length)fail(422,'La conversión de esta compra está pendiente; corrige la factura antes de usarla como referencia.');
       const pickedDate = str(picked.date);
       const sameDate = await db.prepare("SELECT COUNT(*) count FROM document_products p JOIN documents d ON d.id=p.document_id WHERE p.product_id=? AND d.status='confirmed' AND d.kind='invoice' AND d.date=?").bind(productId, pickedDate).first<Row>();
       const latest = await db.prepare("SELECT MAX(d.date) date FROM document_products p JOIN documents d ON d.id=p.document_id WHERE p.product_id=? AND d.status='confirmed' AND d.kind='invoice'").bind(productId).first<Row>();
@@ -708,13 +733,16 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
         if(known){product=matchingCatalogue.find(p=>p.id===known.id)||await db.prepare('SELECT * FROM products WHERE id=?').bind(known.id).first<Row>();matchSource=known.matchSource==='supplier_code'?'learned_code':known.matchSource==='supplier_description'?'learned_description':'catalog';if(matchSource!=='catalog')learnedCount++;}
         if(aliases.length>1||exact.length>1)warnings.push(`Producto ${lines.length+1}: hay varios artículos posibles; revisa la vinculación y presentación.`);
         if(typeof item.suggestedProductId==='string'&&aiCandidateIds.has(item.suggestedProductId)){const proposal=await db.prepare('SELECT * FROM products WHERE id=?').bind(item.suggestedProductId).first<Row>();if(proposal){const previous=candidates.findIndex(c=>c.id===proposal.id);if(previous>=0)candidates.splice(previous,1);candidates.unshift({id:str(proposal.id),name:str(proposal.name),brand:str(proposal.brand),content:str(proposal.content),presentation:str(proposal.presentation),reason:'Sugerencia de Gemini: revisa marca, tamaño y variante antes de vincular.',matchSource:'gemini'});}}
+        const columns=item.purchaseColumns&&typeof item.purchaseColumns==='object'&&!Array.isArray(item.purchaseColumns)?item.purchaseColumns as Row:{};
+        const purchase=resolvePurchaseColumns(decimal(item.quantity??'','Cantidad leída'),decimal(item.unitsPerPack??'','Unidades leídas'),{unitLabel:text(columns.unitLabel??'','Unidad de compra',50),boxes:decimal(columns.boxes??'','Cajas leídas'),units:decimal(columns.units??'','Unidades sueltas leídas'),total:decimal(columns.total??'','Cantidad total leída'),packEvidence:text(columns.packEvidence??'','Respaldo de conversión',200)});
         const line:InvoiceInput['lines'][number]={id:uuid(),productId:product?str(product.id):'',supplierCode,description,
-          quantity:decimal(item.quantity??'','Cantidad leída'),unitsPerPack:decimal(item.unitsPerPack||product?.units_per_pack||'','Unidades leídas'),bonusQuantity:decimal(item.bonusQuantity??'','Bonificación leída'),
+          ...purchase,bonusQuantity:decimal(item.bonusQuantity??'','Bonificación leída'),grossLineTotal:decimal(item.grossLineTotal??'','Total con IVA de línea leído'),
           unitPrice:decimal(item.unitPrice??'','Precio leído'),discountPercent:decimal(item.discountPercent??'','Descuento porcentual',100),discountAmount:decimal(item.discountAmount??'','Descuento leído'),taxRate:decimal(item.taxRate??'','IVA leído',100),otherTax:decimal(item.otherTax??'','Otros impuestos leídos'),otherTaxInBase:typeof item.otherTaxInBase==='boolean'?item.otherTaxInBase:undefined,lineTotal:decimal(item.lineTotal??'','Importe leído'),taxAmount:decimal(item.taxAmount??'','IVA de línea leído'),promotion:item.promotion===true,
-          productCandidates:candidates,newProductAcknowledged:false,category:text(product?.category||item.category||'','Categoría sugerida',120),sourceText:text(item.sourceText??'','Renglón original',2000)};
+          costUnit:text(product?.comparison_unit||item.costUnit||'','Unidad del costo leída',80),contentsMode:['single','multiple'].includes(str(product?.contents_mode||item.contentsMode))?str(product?.contents_mode||item.contentsMode) as 'single'|'multiple':'',innerUnits:decimal(product?.inner_units||item.innerUnits||'','Contenido interior leído'),innerUnitLabel:text(product?.inner_unit_label||item.innerUnitLabel||'','Unidad interior leída',60),productCandidates:candidates,newProductAcknowledged:false,category:text(product?.category||item.category||'','Categoría sugerida',120),sourceText:text(item.sourceText??'','Renglón original',2000)};
         if(matchSource==='learned_description')warnings.push(`Producto ${lines.length+1}: vinculación propuesta por descripción ya revisada de este proveedor; compara tamaño y variante.`);
         if(matchSource==='learned_code')warnings.push(`Producto ${lines.length+1}: vinculación propuesta por código de este proveedor; revisa que sea el mismo artículo.`);
         if(!line.taxRate)warnings.push(`Producto ${lines.length+1}: el IVA no está informado; no se supuso una tarifa.`);
+        if(!line.quantity||!line.unitsPerPack)warnings.push(`Producto ${lines.length+1}: ${purchase.purchaseReading.explanation}`);
         lines.push(line);
       }
       const kind=['invoice','delivery','order'].includes(str(parsed.kind))?str(parsed.kind) as InvoiceInput['kind']:previous.kind;
@@ -792,10 +820,12 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
         units_per_pack: decimal(p.units_per_pack ?? '', 'Unidades restauradas'),
         tax_rate: decimal(p.tax_rate ?? '', 'IVA restaurado', 100),
         sale_price: optionalPrice(p.sale_price ?? '', 'Precio de venta restaurado'),
+        inner_units:innerCount(p.inner_units??''),inner_unit_label:text(p.inner_unit_label??'','Unidad interior restaurada',60),contents_mode:text(p.contents_mode??(p.inner_units?'multiple':''),'Tipo de presentación restaurado',20),
         category: text(p.category ?? '', 'Categoría restaurada', 120),
         created_at: text(p.created_at ?? timestamp, 'Fecha creación producto', 60, true),
         updated_at: text(p.updated_at ?? timestamp, 'Fecha edición producto', 60, true),
       }));
+      for(const product of normalizedProducts){if(!!product.inner_units!==!!product.inner_unit_label)fail(400,'Un contenido interior del respaldo está incompleto.');if(product.contents_mode&&!['single','multiple'].includes(str(product.contents_mode)))fail(400,'Un tipo de presentación del respaldo es inválido.');}
       const seenSupplierCodes = new Set<string>();
       const normalizedSupplierProducts: Row[] = rawSupplierProducts.map(sp => {
         const spId = id(sp.id);
@@ -850,7 +880,7 @@ export async function handleApi(request: Request, env: Bindings, identity: Ident
         }
         const columns: Record<typeof BACKUP_TABLES[number], string[]> = {
           suppliers: ['id', 'name', 'name_key', 'created_at'],
-          products: ['id', 'name', 'category', 'brand', 'content', 'barcode', 'presentation', 'comparison_unit', 'units_per_pack', 'tax_rate', 'sale_price', 'created_at', 'updated_at'],
+          products: ['id', 'name', 'category', 'brand', 'content', 'barcode', 'presentation', 'comparison_unit', 'units_per_pack', 'tax_rate', 'sale_price', 'inner_units', 'inner_unit_label', 'contents_mode', 'created_at', 'updated_at'],
           supplier_products: ['id', 'supplier_key', 'supplier_name', 'supplier_code', 'supplier_description', 'product_id', 'created_at', 'updated_at'],
           product_aliases: ['id','supplier_key','supplier_name','description','description_key','product_id','document_id','confirmed_by','updated_at'],
           documents: ['id', 'version', 'status', 'kind', 'supplier', 'supplier_key', 'number', 'date', 'seller', 'total', 'data', 'validation', 'related_id', 'review_of', 'operation_id', 'update_token', 'created_at', 'updated_at', 'created_by', 'updated_by'],

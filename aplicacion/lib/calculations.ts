@@ -10,7 +10,43 @@ export type InvoiceLine = {
   productCandidates?: ProductCandidate[];newProductAcknowledged?: boolean;identityNote?:string;
   /** Lectura conservada antes de aceptar una propuesta basada en subtotales impresos. */
   taxReading?: {taxRate:string;taxAmount:string};
+  grossLineTotal?:string;
+  purchaseReading?:PurchaseReading;
+  costUnit?:string;contentsMode?:'single'|'multiple'|'';innerUnits?:string;innerUnitLabel?:string;
 };
+export type ProductCostDetails={name:string;category:string;presentation:string;comparisonUnit:string;unitsPerPack:string;contentsMode:string;innerUnits:string;innerUnitLabel:string};
+/** Campos comerciales necesarios para que un costo tenga una unidad inequívoca. PVP, marca y código son opcionales. */
+export function productCostIssues(product:ProductCostDetails):string[]{
+ const issues:string[]=[];
+ if(!product.name.trim())issues.push('Falta el nombre del producto.');if(!product.category.trim())issues.push('Falta la categoría.');
+ if(!product.presentation.trim()||/^seg[uú]n documento$/i.test(product.presentation.trim()))issues.push('Falta definir la presentación comprada.');
+ if(!product.comparisonUnit.trim())issues.push('Falta indicar la unidad del costo: funda, botella, cajita u otra.');
+ try{if(!product.unitsPerPack||read(product.unitsPerPack,'Conversión').n===0n)issues.push('Falta confirmar la conversión de recepción.');}catch{issues.push('La conversión de recepción no es válida.');}
+ if(!['single','multiple'].includes(product.contentsMode))issues.push('Falta confirmar si la presentación contiene una unidad o varias.');
+ if(product.contentsMode==='multiple'){try{if(!product.innerUnits||innerUnitCount(product.innerUnits)==='1')issues.push('Indica cuántas unidades interiores contiene la presentación (más de una).');}catch{issues.push('La cantidad interior debe ser entera y válida.');}if(!product.innerUnitLabel.trim())issues.push('Falta el nombre de la unidad interior.');if(product.innerUnitLabel.trim().toLocaleLowerCase('es')===product.comparisonUnit.trim().toLocaleLowerCase('es'))issues.push('Distingue la presentación de la unidad interior, por ejemplo funda y chupete.');}
+ if(product.contentsMode==='single'&&(product.innerUnits||product.innerUnitLabel))issues.push('Una presentación individual no debe tener un desglose interior.');
+ return issues;
+}
+/** Detección conservadora de conversiones antiguas incompatibles con la columna UNI. No reescribe el historial. */
+export function purchaseCostIssues(line:InvoiceLine):string[]{
+ const issues:string[]=[];try{const factor=read(line.unitsPerPack,'Conversión');if(factor.n!==factor.d){
+  const reading=line.purchaseReading,loose=reading&&(/^(?:un|uni|und|u|unidad|unidades)$/i.test(reading.unitLabel.trim().replace(/\./g,''))||reading.boxes==='0'&&!!reading.units);
+  if(loose||!reading&&/\b(?:UN|UNI|UND)\b/i.test(line.sourceText||''))issues.push('La conversión divide una unidad comprada como UNI. Revisa o corrige esta factura; el tamaño de caja del nombre no confirma unidades recibidas.');
+ }}catch{issues.push('La conversión de esta compra está pendiente.');}return issues;
+}
+/** Presentación legible; la precisión original de seis decimales sigue intacta. */
+export function readableUnitCost(value:string):{amount:string;lessThan:boolean}|null{
+ try{const exact=read(value,'Costo',false,6);if(exact.n<=0n)return null;const display=rounded(exact,3);if(display===0n)return {amount:'0.001',lessThan:true};let amount=fixed(display,3);if(amount.endsWith('0'))amount=amount.slice(0,-1);return {amount,lessThan:false};}catch{return null;}
+}
+export type PurchaseColumns={unitLabel:string;boxes:string;units:string;total:string;packEvidence:string};
+export type PurchaseReading=PurchaseColumns&{quantity:string;unitsPerPack:string;explanation:string};
+export function innerUnitCount(value:string):string{
+ if(value==='')return '';const parsed=read(value,'Contenido de la unidad',false,6);if(parsed.n<=0n||parsed.n%parsed.d!==0n||parsed.n>1000000n*parsed.d)throw new Error('El contenido debe ser una cantidad entera entre 1 y 1000000.');return (parsed.n/parsed.d).toString();
+}
+/** Desglose comercial opcional de la unidad del costo; no cambia cantidades ni costos históricos de factura. */
+export function calculateInnerUnitCost(unitCost:string|null,netUnitCost:string|null,quantity:string,unitLabel:string){
+ try{const count=innerUnitCount(quantity);if(!count||!unitLabel.trim()||unitCost===null)return null;const paid=optionalPositive(unitCost,6);if(!paid)return null;const cost=fixed(rounded(div(paid,read(count,'Contenido')),6),6);if(!optionalPositive(cost,6))return null;const net=netUnitCost?optionalPositive(netUnitCost,6):null,netCost=net?fixed(rounded(div(net,read(count,'Contenido')),6),6):null;return {quantity:count,unitLabel,unitCost:cost,netUnitCost:netCost,references:calculatePriceReferences({unitCost:cost,netUnitCost:netCost,salePrice:'',base:'gross'})};}catch{return null;}
+}
 export type PrintedTaxGroup={taxRate:string;base:string};
 export type ProductCandidate={id:string;name:string;brand:string;content:string;presentation:string;reason:string;matchSource?:'supplier_code'|'supplier_description'|'exact_name'|'similar_name'|'gemini'};
 export type InvoiceInput = {
@@ -23,9 +59,11 @@ export type InvoiceInput = {
   supplierRuc?: string; extractionWarnings?: string[];
   taxSummary?:PrintedTaxGroup[];
   taxReconciliation?:{method:'printed_summary';explanation:string;previousRounding:'line'|'total'};
+  netRounding?:'line'|'document';
 };
 export type CalculatedLine = {
   id: string; net: string; tax: string; gross: string; unitCost: string | null; netUnitCost?: string | null;
+  displayNet?:string;displayGross?:string;
   /** Only for delivery/order: identified provisional reference (pre-tax, and with tax when known); never a confirmed cost. */
   provisionalNetUnitCost?: string | null; provisionalUnitCost?: string | null;
 };
@@ -42,6 +80,7 @@ export type ValidationResult = {
   /** When a rounding discrepancy is detected and the alternate mode matches the printed values exactly. */
   roundingSuggestion?: 'line' | 'total';
   taxBases?:PrintedTaxGroup[];
+  precisionSuggestion?:boolean;
 };
 type Rational = { n: bigint; d: bigint };
 const ZERO: Rational = { n: 0n, d: 1n };
@@ -86,6 +125,31 @@ function read(value: unknown, name: string, emptyZero = false, digits = 6): Rati
 function cents(value: unknown, name: string, emptyZero = false): bigint {
   return rounded(read(value, name, emptyZero, 2), 2);
 }
+/** Las columnas compradas prevalecen sobre la descripción comercial; nunca interpreta «X12» como recepción. */
+export function resolvePurchaseColumns(quantity:string,unitsPerPack:string,columns:PurchaseColumns){
+ const reading:PurchaseReading={...columns,quantity,unitsPerPack,explanation:''};
+ const result=(q:string,factor:string,explanation:string)=>({quantity:q,unitsPerPack:factor,purchaseReading:{...reading,explanation}});
+ try{
+  const values=[quantity,unitsPerPack,columns.boxes,columns.units,columns.total];for(const value of values)if(value!=='')read(value,'Cantidad leída');
+  const positive=(value:string)=>value!==''&&read(value,'Cantidad').n>0n,equal=(a:string,b:string)=>{const x=read(a,'Cantidad'),y=read(b,'Cantidad');return x.n*y.d===y.n*x.d;};
+  const unit=/^(?:un|uni|und|u|unidad|unidades)$/i.test(columns.unitLabel.trim().replace(/\./g,''));
+  const pack=/^(?:cj|caj|caja|cajas|dp|display|paq|paquete|paca|bulto|funda)$/i.test(columns.unitLabel.trim().replace(/\./g,''));
+  const noBoxes=columns.boxes!==''&&!positive(columns.boxes);
+  if(noBoxes&&positive(columns.units)||unit&&!positive(columns.boxes)){
+   const actual=columns.total||columns.units||quantity;
+   if(columns.total!==''&&columns.units!==''&&noBoxes&&!equal(columns.total,columns.units))return result('','','Las columnas de unidades y cantidad total se contradicen. Revisa el original antes de confirmar.');
+   return result(actual,'1','Se compraron unidades sueltas según las columnas del documento. Cada unidad comprada cuenta como una unidad de comparación; los «X…» del nombre no se multiplican.');
+  }
+  if(unitsPerPack!==''&&positive(unitsPerPack)&&!equal(unitsPerPack,'1')&&!/\b(?:fracci[oó]n|factor|conversi[oó]n)\b|uni(?:dades)?\s*(?:por|x|\/)\s*(?:caj|pac|paq|disp|bult)/i.test(columns.packEvidence))return result(quantity,'','La conversión del empaque no está respaldada por una columna explícita. El «X…» de la descripción no confirma cuántas unidades recibiste.');
+  if(positive(columns.boxes)&&positive(columns.units))return result(quantity,'','Hay cajas y unidades sueltas. Revisa qué cantidad corresponde al precio antes de convertir el empaque.');
+  if(positive(columns.boxes)){
+   if(!pack||!positive(unitsPerPack))return result(quantity,'','Hay cajas, pero no está claro si el precio corresponde a la caja o a sus unidades. Confirma la presentación antes de convertir.');
+   if(columns.total!==''&&!equal(columns.total,columns.boxes)){const received=mul(read(columns.boxes,'Cajas'),read(unitsPerPack,'Conversión')),total=read(columns.total,'Cantidad total');if(total.n*received.d!==received.n*total.d)return result('','','Las cajas, la conversión y la cantidad total no coinciden. Revisa las columnas del original.');}
+   return result(columns.boxes,unitsPerPack,'El precio está identificado por presentación comprada. Se usan las cajas como cantidad y su conversión explícita una sola vez; T.Cant. no se vuelve a multiplicar.');
+  }
+  return result(quantity||columns.total,unitsPerPack,unitsPerPack?'Se conservó la cantidad del documento y la conversión explícita para revisión.':'La descripción no determina la conversión. Falta confirmar la presentación comprada.');
+ }catch{return result('','','Las cantidades leídas no son válidas. Se conserva la lectura original para revisión.');}
+}
 /** Solo bases y tarifas explícitas. Vacío, no sujeto y exento nunca se convierten en tarifa cero. */
 export function parsePrintedTaxSummary(value:unknown):PrintedTaxGroup[]{
   if(value===undefined)return [];
@@ -114,9 +178,16 @@ function allocate(amount: bigint, weights: bigint[]): bigint[] {
   for (const item of order) { if (left === 0n) break; result[item.index]++; left--; }
   return result;
 }
+function exactWeights(values:Rational[]):bigint[]{const denominator=values.reduce((common,value)=>common/gcd(common,value.d)*value.d,1n);return values.map(value=>value.n*(denominator/value.d));}
+/** Reparte el neto sin superar el importe pagado asignado a cada línea; conserva todos los centavos. */
+function allocateCapped(amount:bigint,weights:bigint[],caps:bigint[]):bigint[]{
+ const sum=weights.reduce((a,b)=>a+b,0n);if(sum===0n)return weights.map(()=>0n);
+ const result=weights.map((weight,index)=>{const share=amount*weight/sum;return share>caps[index]?caps[index]:share;}),order=weights.map((weight,index)=>({index,remainder:amount*weight%sum})).sort((a,b)=>a.remainder===b.remainder?a.index-b.index:a.remainder>b.remainder?-1:1);
+ let left=amount-result.reduce((a,b)=>a+b,0n);while(left>0n){let progress=false;for(const item of order)if(left>0n&&result[item.index]<caps[item.index]){result[item.index]++;left--;progress=true;}if(!progress)throw new Error('No se pudo distribuir el redondeo conservando los importes.');}return result;
+}
 
 /** Validate printed data without altering it; unknown is never silently converted to zero. */
-export function validateInvoice(input: InvoiceInput): ValidationResult {
+export function validateInvoice(input: InvoiceInput,suggestMethods=true): ValidationResult {
   const errors: string[] = [], warnings: string[] = [], lines: CalculatedLine[] = [];
   const output: ValidationResult = { valid: false, errors, warnings, subtotal: '0.00', tax: '0.00', total: '0.00', lines };
   if (!input || typeof input !== 'object') { errors.push('Faltan los datos del documento.'); return output; }
@@ -144,11 +215,14 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
     }
   }
   if (input.rounding !== 'line' && input.rounding !== 'total') errors.push('Selecciona redondeo por línea o por grupo de IVA.');
+  if(input.netRounding!==undefined&&!['line','document'].includes(input.netRounding))errors.push('Selecciona un método de redondeo de subtotales válido.');
+  const precise=input.netRounding==='document';
+  if(precise&&input.rounding!=='total')errors.push('El método de precisión hasta el subtotal requiere IVA sobre la base acumulada.');
   if (!Array.isArray(input.lines) || input.lines.length < 1 || input.lines.length > 200) {
     errors.push('El documento debe contener entre 1 y 200 productos.'); return output;
   }
   if (input.kind !== 'invoice') warnings.push('Documento comercial: su cuadre no lo convierte en factura ni publica costos de compra confirmados.');
-  const prepared: { source: InvoiceLine; net: bigint; rate: Rational | null; other: bigint; otherInBase: boolean | null; units: Rational | null; printedTax: bigint | null; allocated: bigint | null }[] = [];
+  const prepared: { source: InvoiceLine; net: bigint; netExact:Rational; rate: Rational | null; other: bigint; otherInBase: boolean | null; units: Rational | null; printedTax: bigint | null; allocated: bigint | null }[] = [];
   const ids = new Set<string>();
   for (let i = 0; i < input.lines.length; i++) {
     const line = input.lines[i], label = `Producto ${i + 1}`;
@@ -157,6 +231,9 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
       if (typeof line.id !== 'string' || !line.id || line.id.length > 200 || ids.has(line.id)) throw new Error(`${label}: identificador ausente o repetido.`);
       ids.add(line.id);
       if (typeof line.productId !== 'string' || line.productId.length > 200) throw new Error(`${label}: producto vinculado inválido.`);
+      for(const [key,max] of [['costUnit',80],['innerUnitLabel',60]] as const)if(line[key]!==undefined&&(typeof line[key]!=='string'||line[key]!.length>max||/[\u0000-\u001f]/.test(line[key]!)))throw new Error(`${label}: presentación inválida.`);
+      if(line.contentsMode!==undefined&&!['','single','multiple'].includes(line.contentsMode))throw new Error(`${label}: tipo de presentación inválido.`);
+      if(line.innerUnits!==undefined)innerUnitCount(line.innerUnits);
       if (line.supplierCode !== undefined && (typeof line.supplierCode !== 'string' || line.supplierCode.length > 100 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(line.supplierCode))) throw new Error(`${label}: código de proveedor inválido.`);
       if (!line.productId.trim()) (input.kind === 'invoice' ? errors : warnings).push(`${label}: vincula el producto del catálogo antes de publicar un costo.`);
       if (typeof line.description !== 'string' || !line.description.trim() || line.description.length > 1000) throw new Error(`${label}: escribe una descripción válida.`);
@@ -202,6 +279,8 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
       const otherInBase = other === 0n ? false : typeof line.otherTaxInBase === 'boolean' ? line.otherTaxInBase : null;
       if (otherInBase === null) (input.kind === 'invoice' ? errors : warnings).push(`${label}: falta indicar si el cargo adicional integra la base del IVA; consulta el documento.`);
       const printedTax = line.taxAmount === '' ? null : cents(line.taxAmount, `${label}, IVA impreso`);
+      if(line.grossLineTotal!==undefined&&line.grossLineTotal!=='')cents(line.grossLineTotal,`${label}, total con IVA impreso`);
+      if(line.purchaseReading!==undefined){const reading=line.purchaseReading;if(!reading||typeof reading!=='object')throw new Error(`${label}: lectura de cantidades inválida.`);for(const value of [reading.quantity,reading.unitsPerPack,reading.boxes,reading.units,reading.total])if(value!=='')read(value,`${label}, cantidad original`);for(const value of [reading.unitLabel,reading.packEvidence,reading.explanation])if(typeof value!=='string'||value.length>1000||/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value))throw new Error(`${label}: explicación de cantidades inválida.`);}
       if(line.taxReading!==undefined){if(!line.taxReading||typeof line.taxReading!=='object')throw new Error(`${label}: lectura anterior de IVA inválida.`);for(const value of [line.taxReading.taxRate,line.taxReading.taxAmount])if(value!=='')read(value,`${label}, lectura anterior de IVA`);}
       let allocated: bigint | null = null;
       if (line.promotion) {
@@ -216,16 +295,19 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
         warnings.push(`${label}: importe cero; marca la promoción y revisa su asignación antes de usarlo como referencia de costo.`);
       }
       if (greater(pct, rat(90n))) warnings.push(`${label}: descuento de ${line.discountPercent} %; comprueba la promoción.`);
-      prepared.push({ source: line, net, rate, other, otherInBase, units, printedTax, allocated });
+      prepared.push({ source: line, net, netExact, rate, other, otherInBase, units, printedTax, allocated });
     } catch (error) { errors.push(error instanceof Error ? error.message : `${label}: datos inválidos.`); }
   }
   if (prepared.length !== input.lines.length) return output;
   try {
-    const grossNet = prepared.reduce((sum, line) => sum + line.net, 0n);
+    if(precise&&(cents(input.discount,'Descuento general',true)!==0n||prepared.some(line=>line.other!==0n||line.rate===null)))throw new Error('Este método de precisión requiere tarifas conocidas y no admite todavía descuentos generales ni cargos adicionales; conserva la revisión pendiente.');
+    const initialNets=prepared.map(line=>line.net);
+    if(precise){const groups=new Map<string,number[]>();prepared.forEach((line,index)=>{const key=line.rate!.n+'/'+line.rate!.d;groups.set(key,[...(groups.get(key)||[]),index]);});for(const indices of groups.values()){const exact=indices.map(index=>prepared[index].netExact),sum=exact.reduce(add,ZERO),shares=allocate(rounded(sum,2),exactWeights(exact));indices.forEach((index,n)=>{initialNets[index]=shares[n];});}warnings.push('Método explícito: se conserva la precisión del precio hasta sumar el subtotal por tarifa. Los centavos pagados se distribuyen entre las líneas por mayor residuo; los importes impresos de cada fila se comprueban por separado.');}
+    const grossNet = initialNets.reduce((sum, net) => sum + net, 0n);
     const discount = cents(input.discount, 'Descuento general', true);
     if (discount > grossNet) throw new Error('El descuento general supera el subtotal de productos.');
-    const discountAllocations = allocate(discount, prepared.map(line => line.net));
-    const nets = prepared.map((line, index) => line.net - discountAllocations[index]);
+    const discountAllocations = allocate(discount, initialNets);
+    const nets = initialNets.map((net, index) => net - discountAllocations[index]);
     const taxBases = prepared.map((line, index) => nets[index] + (line.otherInBase === true ? line.other : 0n));
     const taxes = prepared.map((line, index) => line.rate && line.otherInBase !== null ? rounded(mul(rat(taxBases[index], 100n), div(line.rate, HUNDRED)), 2) : 0n);
     if (input.rounding === 'total') {
@@ -241,6 +323,7 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
         const totalTax = rounded(mul(rat(base, 100n), div(rate, HUNDRED)), 2);
         const split = allocate(totalTax, indices.map(index => taxBases[index]));
         indices.forEach((index, n) => { taxes[index] = split[n]; });
+        if(precise){const weights=exactWeights(indices.map(index=>prepared[index].netExact)),grossShares=allocate(base+totalTax,weights),netShares=allocateCapped(base,weights,grossShares);indices.forEach((index,n)=>{nets[index]=netShares[n];taxBases[index]=netShares[n];taxes[index]=grossShares[n]-netShares[n];});}
       }
     }
     const tax = taxes.reduce((sum, value) => sum + value, 0n);
@@ -273,7 +356,7 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
     if (!knownTax) warnings.push('Cuadre parcial: coincidir en el total no verifica impuestos no informados.');
 
     // If printed and calculated differ, check whether the alternate rounding mode reproduces the printed amounts exactly.
-    if (knownTax && (printedTotal !== total || (input.taxTotal !== '' && cents(input.taxTotal, 'IVA total impreso') !== tax))) {
+    if (!precise && knownTax && (printedTotal !== total || (input.taxTotal !== '' && cents(input.taxTotal, 'IVA total impreso') !== tax))) {
       let altTaxes: bigint[];
       if (input.rounding === 'total') {
         altTaxes = prepared.map((line, index) => line.rate && line.otherInBase !== null ? rounded(mul(rat(taxBases[index], 100n), div(line.rate, HUNDRED)), 2) : 0n);
@@ -304,8 +387,11 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
     }
 
     prepared.forEach((line, index) => {
-      if (line.printedTax !== null && line.rate !== null && line.otherInBase !== null && line.printedTax !== taxes[index]) errors.push(`Producto ${index + 1}: IVA impreso distinto al calculado $${fixed(taxes[index])}.`);
+      const displayTax=precise&&line.rate!==null?rounded(mul(line.netExact,div(line.rate,HUNDRED)),2):taxes[index];
+      if (line.printedTax !== null && line.rate !== null && line.otherInBase !== null && line.printedTax !== displayTax) errors.push(`Producto ${index + 1}: IVA impreso distinto al calculado $${fixed(displayTax)}.`);
       const gross = nets[index] + taxes[index] + line.other;
+      const displayGross=precise&&line.rate!==null?rounded(add(line.netExact,mul(line.netExact,div(line.rate,HUNDRED))),2):gross;
+      if(line.source.grossLineTotal!==undefined&&line.source.grossLineTotal!==''&&line.rate!==null&&cents(line.source.grossLineTotal,'Total con IVA de línea')!==displayGross)errors.push(`Producto ${index+1}: el total con IVA impreso no coincide; se calcula $${fixed(displayGross)}.`);
       const hasAllocatedCost = line.source.promotion && line.allocated !== null;
       const pending = input.kind !== 'invoice' || !line.source.productId.trim() || (line.source.promotion && !hasAllocatedCost) || !line.units || !knownTax || (!hasAllocatedCost && line.net === 0n);
       const effectivePaid = hasAllocatedCost ? line.allocated! : gross;
@@ -323,6 +409,7 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
       const inRange = (value: bigint | null) => value !== null && value > 0n && value <= MAX * pow(6);
       lines.push({
         id: line.source.id, net: fixed(nets[index]), tax: fixed(taxes[index]), gross: fixed(gross),
+        ...(precise?{displayNet:fixed(line.net),displayGross:fixed(displayGross)}:{}),
         unitCost: publishable ? fixed(cost, 6) : null,
         netUnitCost: publishable && netCost !== null && netCost > 0n && netCost <= MAX * pow(6) ? fixed(netCost, 6) : null,
         provisionalNetUnitCost: inRange(provisionalNet) ? fixed(provisionalNet!, 6) : null,
@@ -331,11 +418,19 @@ export function validateInvoice(input: InvoiceInput): ValidationResult {
     });
     output.subtotal = fixed(subtotal); output.tax = fixed(tax); output.total = fixed(total);
     output.valid = errors.length === 0;
+    if(!output.valid&&suggestMethods&&!precise){const alternate=validateInvoice({...input,netRounding:'document',rounding:'total'},false);if(alternate.valid){output.precisionSuggestion=true;warnings.push('El documento coincide si se conserva la precisión del precio hasta el subtotal. Puedes revisar y aplicar ese método explícitamente.');}}
     return output;
   } catch (error) {
     errors.push(error instanceof Error ? error.message : 'No fue posible comprobar los importes.');
     return output;
   }
+}
+
+export function applyDocumentPrecision(input:InvoiceInput):InvoiceInput{
+ const next={...input,netRounding:'document' as const,rounding:'total' as const},check=validateInvoice({...next,lines:next.lines.map((line,index)=>({...line,productId:line.productId||'revision-'+index}))},false);
+ if(!check.valid)throw new Error('Ese método no reproduce todos los importes del documento. Revisa primero los datos.');
+ const note='Método revisado: precisión completa del precio hasta el subtotal por tarifa, IVA sobre base acumulada y reparto explícito de centavos por mayor residuo. Se conservan los subtotales y totales impresos de cada línea.';
+ const notes=[input.notes,note].filter(Boolean).join('\n');if(notes.length>10000)throw new Error('Las notas están llenas; conserva su contenido antes de añadir la explicación.');return {...next,notes};
 }
 
 export type TaxDistributionResult={
@@ -351,17 +446,18 @@ export function analyzeTaxDistribution(input:InvoiceInput):TaxDistributionResult
  let groups:PrintedTaxGroup[];
  try{groups=parsePrintedTaxSummary(input.taxSummary);}catch(e){return result('invalid',e instanceof Error?e.message:'Revisa los subtotales por IVA.');}
  if(!groups.length)return result('missing','Faltan los subtotales impresos por tarifa. Vuelve a leer el original para proponer el reparto; el IVA total por sí solo no identifica los productos gravados.');
+ if(input.netRounding==='document'){const checked=validateInvoice({...input,lines:input.lines.map((line,index)=>({...line,productId:line.productId||'revision-'+index}))},false);return checked.valid?{...result('consistent','Las bases y los totales coinciden usando precisión completa hasta el subtotal.',groups),subtotal:checked.subtotal,tax:checked.tax,total:checked.total}:result('invalid','Con precisión hasta el subtotal, revisa las tarifas y los importes originales antes de proponer otro reparto de IVA.',groups);}
  try{
   if(!Array.isArray(input.lines)||!input.lines.length||input.lines.length>200)return result('invalid','Revisa la lista de productos antes de repartir el IVA.',groups);
   // Se comprueba solo el álgebra de importes, independientemente del catálogo y de conversiones aún pendientes.
   // Los identificadores y conversiones auxiliares nunca se copian al documento del usuario.
-  const algebra:InvoiceInput={...input,kind:'invoice',supplier:'Comprobación interna',number:'COMPROBACION',date:'2026-01-01',seller:'',relatedId:'',notes:'',taxSummary:undefined,taxReconciliation:undefined,taxTotal:'0',lines:input.lines.map((line,index)=>({...line,productId:'algebra-'+index,unitsPerPack:'1',taxRate:'0',taxAmount:''}))};
+  const algebra:InvoiceInput={...input,kind:'invoice',supplier:'Comprobación interna',number:'COMPROBACION',date:'2026-01-01',seller:'',relatedId:'',notes:'',taxSummary:undefined,taxReconciliation:undefined,taxTotal:'0',lines:input.lines.map((line,index)=>({...line,productId:'algebra-'+index,unitsPerPack:'1',taxRate:'0',taxAmount:'',grossLineTotal:''}))};
   const math=validateInvoice(algebra);
   if(math.lines.length!==input.lines.length||math.errors.some(error=>!error.startsWith('El total impreso no coincide:')))return result('invalid','Primero revisa cantidades, precios, descuentos, importes netos y cargos adicionales. No se propone IVA para compensar esos errores.',groups);
   const bases=math.lines.map((line,index)=>cents(line.net,'Neto')+(input.lines[index].otherTaxInBase===true?cents(input.lines[index].otherTax,'Cargo',true):0n));
   const targets=groups.map(group=>cents(group.base,'Base impresa'));
   if(bases.reduce((sum,base)=>sum+base,0n)!==targets.reduce((sum,base)=>sum+base,0n))return result('mismatch','Los subtotales por tarifa no cubren los productos calculados. Puede faltar una base exenta/no sujeta, un descuento o un renglón. No hay un reparto fiable.',groups);
-  const current=validateInvoice({...algebra,taxSummary:groups,taxTotal:input.taxTotal,lines:algebra.lines.map((line,index)=>({...line,taxRate:input.lines[index].taxRate,taxAmount:input.lines[index].taxAmount}))});
+  const current=validateInvoice({...algebra,taxSummary:groups,taxTotal:input.taxTotal,lines:algebra.lines.map((line,index)=>({...line,taxRate:input.lines[index].taxRate,taxAmount:input.lines[index].taxAmount,grossLineTotal:input.lines[index].grossLineTotal}))});
   if(current.valid)return {...result('consistent','Las tarifas de las líneas, sus bases y los totales coinciden con el resumen impreso.',groups),subtotal:current.subtotal,tax:current.tax,total:current.total};
   type State={sums:bigint[];count:number;path:bigint};
   let states=new Map<string,State>([['start',{sums:targets.map(()=>0n),count:1,path:0n}]]),work=0;
@@ -375,7 +471,7 @@ export function analyzeTaxDistribution(input:InvoiceInput):TaxDistributionResult
   if(!solution||solution.sums.some((base,index)=>base!==targets[index]))return result('mismatch','Ninguna combinación de productos reproduce exactamente las bases impresas. Revisa la lectura o consulta el XML del proveedor.',groups);
   if(solution.count>1)return result('ambiguous','Hay varias combinaciones de productos que dan los mismos subtotales. El total no permite saber cuál lleva cada tarifa; revisa el XML o el detalle del proveedor.',groups);
   let path=solution.path;const rates=input.lines.map(()=> '');for(let i=rates.length-1;i>=0;i--){rates[i]=groups[Number(path&7n)].taxRate;path>>=3n;}
-  const proposal:InvoiceInput={...algebra,taxSummary:groups,taxTotal:input.taxTotal,lines:algebra.lines.map((line,index)=>({...line,taxRate:rates[index]}))};
+  const proposal:InvoiceInput={...algebra,taxSummary:groups,taxTotal:input.taxTotal,lines:algebra.lines.map((line,index)=>({...line,taxRate:rates[index],grossLineTotal:input.lines[index].grossLineTotal}))};
   let checked=validateInvoice(proposal),rounding=input.rounding;
   if(!checked.valid){rounding=rounding==='line'?'total':'line';checked=validateInvoice({...proposal,rounding});}
   if(!checked.valid)return result('mismatch','El reparto reproduce las bases, pero no el IVA y total impresos con los redondeos admitidos. No se aplicó ningún ajuste para forzar el cuadre.',groups);
@@ -423,7 +519,7 @@ export function calculatePriceReferences(input: {
     increases: selected ? ([20, 25, 30] as const).map(percent => ({
       percent,
       price: fixed(rounded(mul(selected, rat(BigInt(100 + percent), 100n)), 2), 2),
-    })) : [],
+    })).filter(item=>cents(item.price,'Precio sugerido')>0n) : [],
     salePrice: sale ? fixed(rounded(sale, 2), 2) : null,
     commercialDifference: diff ? fixed(rounded(diff, 6), 6) : null,
     commercialPercent: diff && paid ? fixed(rounded(div(mul(diff, HUNDRED), paid), 2), 2) : null,

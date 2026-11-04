@@ -104,6 +104,46 @@ Las copias diarias de actividad se conservan localmente. El respaldo JSON tiene 
 
 Esta copia integral incluye cuentas y material de conexión: mantenla privada. No copiar solo tienda.sqlite mientras el programa está abierto, pues puede tener operaciones pendientes en los archivos WAL. No se ha implementado aún un botón de copia integral de tamaño ilimitado.
 
+## Cantidad comprada y contenido de una caja
+
+Una ficha debe indicar **categoría, presentación, unidad del costo, conversión y tipo de presentación**. Elige **Una unidad individual** para una unidad sin desglose de piezas, o **Contiene varias unidades** para una funda, cajita u otra presentación con contenido individual; en ese caso completa cantidad y nombre interior. Marca, código de barras, precio de venta y referencia habitual de IVA son opcionales; el IVA real de cada factura sigue siendo necesario.
+
+Si falta un dato necesario, verás **Pendiente de revisión** y su motivo. Los importes no aparecen como costos vigentes ni generan precios sugeridos. Se conserva el registro para completarlo. Un producto nuevo dependiente de una factura no se publica desde una lectura incompleta o incoherente, y la factura nueva no se confirma hasta resolverlo.
+
+Gemini puede proponer estos campos y se recuerdan en la ficha revisada. Un nombre como **24X28 UND CJ** no dice por sí solo qué número corresponde a la funda. Si el contenido no está inequívoco, queda pendiente. Si un documento identifica un contenido diferente al de la ficha, se necesita revisar la presentación o vincular el producto correcto.
+
+La cantidad de la factura y los números del nombre describen cosas diferentes. Si compraste una maicena de 200 g por $0,86 y la unidad impresa es **UNI**, su costo es **$0,86**. El texto **X24 UND CJ** puede describir la caja del proveedor; no se divide entre 24 por ese nombre.
+
+La lectura toma primero las columnas **Caj.**, **Uni.**, **T.Cant.** y **Unidad**. En **Cómo se leyó la cantidad comprada** puedes consultar las columnas y la conversión anteriores. Si falta información sobre una caja o hay contradicciones, la conversión queda pendiente. En **Unidades de comparación por presentación comprada**, escribe **1** cuando cada unidad comprada sea la misma unidad del costo.
+
+Si una factura ya está confirmada, usa **Crear corrección**, indica el motivo, revisa la conversión y confirma el reemplazo. El original se conserva en el historial; no se borra ni se sobreescribe su información.
+
+Para una cajita de Ranchero que cuesta $1,30 y contiene ocho sobres, entra en **Productos → Editar**:
+
+1. Define **Unidad del costo: cajita** y conserva **Factor habitual de recepción: 1** cuando compras cajitas.
+2. En **Venta por partes**, indica **8** y **sobre**. Si aparece **Usar contenido sugerido**, comprueba la propuesta antes de guardar.
+3. Guarda. En **Costo de compra** verás dos columnas: **Presentación: $1,30 por cajita** y **Unidad interior: $0,1625 por sobre**, con los importes grandes. **Venta sugerida +25 %** separa también ambas unidades. El X144 del embalaje mayor no interviene. Esta configuración no cambia cantidades ni costos de compras confirmadas.
+
+El precio de venta actual de la ficha corresponde a la unidad del costo. Las referencias de venta por partes se calculan por separado sobre su costo pagado, con el mismo redondeo monetario explícito.
+
+Ejemplo confirmado por el propietario: una **funda de 24 chupetes** con costo total de **$2,05** tiene costo interno de **$0,085417 por chupete**. La consulta diaria lo muestra como **$0,085**, conservando la precisión para los cálculos y referencias. Los precios sugeridos de venta siguen en centavos. El valor exacto de una celda puede consultarse al mantener el puntero sobre el importe; el editor de factura conserva los decimales impresos.
+
+Los costos antiguos que dividían UNI por el número de caja del nombre se muestran pendientes también en el historial. No se sustituyen por cero ni se usan para calcular variaciones. Abre la factura y utiliza **Crear una corrección** para revisar esos registros; sus datos originales se conservan.
+
+## Consultar sin perder de vista la lista
+
+**Proveedores**, **Ver compras** y **Editar** abren paneles flotantes sobre el lado derecho. Puedes desplazarte por la lista visible y por el contenido del panel de forma independiente. **Minimizar** deja la cabecera para poder acceder a otros productos; **Expandir** recupera el contenido y la **X** lo cierra.
+
+Si editas una ficha y cambias de producto, de sección o cierras sin guardar, aparece un aviso para conservar la edición o descartarla. Abrir **Ayuda** y cerrarla devuelve la ficha con sus cambios. **Guardar** conserva la información; cerrar o minimizar no confirma una compra.
+
+## Buscar productos y revisar la precisión de una factura
+
+En **Productos** puedes buscar también por categoría, seleccionar una categoría y ordenar por **Compra más reciente**, **Agregados recientemente**, **Nombre A–Z** o **Nombre Z–A**. El orden de compras usa la fecha de la factura confirmada. Los filtros se aplican a todo el catálogo antes de paginar. **Limpiar filtros** recupera la vista inicial.
+
+Cuando una fila trae **SUBTOTAL** y **TOTAL**, el primero es el neto y el segundo puede incluir IVA. La revisión permite comprobar ambos. Un precio con tres o más decimales se conserva tal como fue leído.
+
+Si tres precios de $2,777 producen un subtotal impreso de $8,33, puede aparecer **Usar precisión del precio hasta el subtotal**. Revisa y acepta ese método para reproducir **$8,33 + $1,25 de IVA = $9,58**. Se conservan los importes impresos de cada fila y se explica el reparto de centavos en las notas. Puedes deshacerlo antes de confirmar. Este método requiere tarifas conocidas y no admite todavía descuentos generales ni cargos adicionales.
+
 ## Si algo falla
 
 - Si el servidor está detenido, usa el acceso de inicio. Los registros de diagnóstico están en **%LOCALAPPDATA%\MiTienda\registros**.

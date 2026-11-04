@@ -50,6 +50,20 @@
       "when": 1793758377087,
       "tag": "0006_cultured_professor_monster",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793806302743,
+      "tag": "0007_reflective_sumo",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793810934596,
+      "tag": "0008_steady_yellow_claw",
+      "breakpoints": true
     }
   ]
 }

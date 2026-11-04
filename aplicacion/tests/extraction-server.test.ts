@@ -1,14 +1,15 @@
+import {completeProductFixture} from './fixtures/products.ts';
 import {test,before,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {readdir,readFile} from 'node:fs/promises';
 import {Miniflare} from 'miniflare';
 import {handleApi} from '../lib/server.ts';
-import {applyTaxDistribution,analyzeTaxDistribution,type InvoiceInput} from '../lib/calculations.ts';
+import {applyTaxDistribution,analyzeTaxDistribution,applyDocumentPrecision,validateInvoice,type InvoiceInput} from '../lib/calculations.ts';
 type Doc={id:string;version:number;data:InvoiceInput;status:string};
 type ExtractReply={extracted:InvoiceInput;document?:Doc;error?:string;warnings:string[]};
 let mf:Miniflare;let db:D1Database;let bucket:R2Bucket;
 const owner={userId:'extract-owner',email:'lectura@tienda.test',displayName:'Prueba'};
-async function request<T>(path:string,payload?:unknown){const response=await handleApi(new Request('https://tienda.test/api/'+path,payload===undefined?{}:{method:'POST',headers:{origin:'https://tienda.test','content-type':'application/json'},body:JSON.stringify(payload)}),{DB:db,BUCKET:bucket,OWNER_EMAIL:owner.email},owner);return {status:response.status,value:await response.json() as T};}
+async function request<T>(path:string,payload?:unknown){if(path==='products'&&payload!==undefined)payload=completeProductFixture(payload);const response=await handleApi(new Request('https://tienda.test/api/'+path,payload===undefined?{}:{method:'POST',headers:{origin:'https://tienda.test','content-type':'application/json'},body:JSON.stringify(payload)}),{DB:db,BUCKET:bucket,OWNER_EMAIL:owner.email},owner);return {status:response.status,value:await response.json() as T};}
 const blank=():InvoiceInput=>({kind:'invoice',supplier:'',number:'',date:'',seller:'',relatedId:'',discount:'',rounding:'line',taxTotal:'',total:'',notes:'',lines:[]});
 before(async()=>{mf=new Miniflare({modules:true,script:'export default {fetch(){return new Response("ok")}}',compatibilityDate:'2026-05-15',d1Databases:{DB:'extract-test'},r2Buckets:['BUCKET']});db=await mf.getD1Database('DB') as unknown as D1Database;bucket=await mf.getR2Bucket('BUCKET') as unknown as R2Bucket;for(const file of (await readdir(new URL('../drizzle/',import.meta.url))).filter(f=>f.endsWith('.sql')).sort()){for(const statement of (await readFile(new URL('../drizzle/'+file,import.meta.url),'utf8')).split('--> statement-breakpoint').map(s=>s.trim()).filter(Boolean))await db.prepare(statement).run();}await request('state');});
 after(async()=>{await mf.dispose();});
@@ -44,4 +45,37 @@ test('categoría persistente y asociación conocida no borran el IVA impreso',as
   assert.equal(restored.status,200,await restored.text());assert.equal((await restoredDb.prepare('SELECT category FROM products WHERE id=?').bind(product.value.product.id).first<{category:string}>())?.category,'Alimentos');
   const restoredMixed=await restoredDb.prepare("SELECT data FROM documents WHERE number='MIXTA-TEST'").first<{data:string}>();assert.ok(restoredMixed);const mixed=JSON.parse(restoredMixed.data) as InvoiceInput;assert.equal(mixed.taxSummary?.length,2);assert.equal(mixed.taxReconciliation?.method,'printed_summary');assert.deepEqual(mixed.lines[1].taxReading,{taxRate:'0.00',taxAmount:'0.00'});
  }finally{await destination.dispose();}
+});
+
+test('una unidad UNI prevalece sobre X24 y corrige una compra confirmada conservando la anterior',async()=>{
+ const product=(await request<{product:{id:string}}>('products',{name:'MAICENA FICTICIA 200GR X24',unitsPerPack:'1',taxRate:'0'})).value.product;
+ const doc=(await request<{document:Doc}>('documents',{data:blank()})).value.document;
+ const structured={kind:'invoice',supplier:'Proveedor de unidades ficticio',number:'UNIDAD-TEST',date:'2026-11-04',taxTotal:'0.00',total:'0.86',lines:[{description:'MAICENA FICTICIA 200GR X24',quantity:'1.0000',unitsPerPack:'24',unitPrice:'0.8600',lineTotal:'0.86',taxRate:'0',purchaseColumns:{unitLabel:'UNI',boxes:'',units:'',total:'',packEvidence:''}}]};
+ const extraction=await request<ExtractReply>('ai/extract-document',{documentId:doc.id,version:doc.version,structured});assert.equal(extraction.status,200);const data=extraction.value.extracted;
+ assert.equal(data.lines[0].quantity,'1.0000');assert.equal(data.lines[0].unitsPerPack,'1');assert.equal(data.lines[0].purchaseReading?.unitsPerPack,'24');assert.equal(validateInvoice(data).lines[0].unitCost,'0.860000');
+ // Se reproduce una conversión antigua equivocada para comprobar la corrección inmutable.
+ const previous={...data,lines:data.lines.map(line=>({...line,unitsPerPack:'24'}))},saved=(await request<{document:Doc}>('documents',{id:doc.id,version:doc.version,data:previous})).value.document;
+ assert.equal((await request('documents/'+doc.id+'/confirm',{version:saved.version,operationId:crypto.randomUUID()})).status,422,'La API nueva no admite publicar la conversión antigua.');
+ // Instantánea histórica creada por una versión anterior; no se relaja la validación actual para reproducirla.
+ const oldValidation=validateInvoice(previous),oldLine=previous.lines[0],oldCost=oldValidation.lines[0];
+ await db.batch([db.prepare("UPDATE documents SET status='confirmed',version=version+1,validation=? WHERE id=?").bind(JSON.stringify(oldValidation),doc.id),db.prepare('INSERT INTO document_products(document_id,line_id,product_id,unit_cost,net_unit_cost,units_per_pack,tax_rate,supplier_code,promotion) VALUES(?,?,?,?,?,?,?,?,?)').bind(doc.id,oldLine.id,oldLine.productId,oldCost.unitCost,oldCost.netUnitCost,'24','0','',0)]);
+ const confirmed=(await request<{document:Doc}>('documents/'+doc.id)).value.document;assert.equal(confirmed.status,'confirmed');
+ const revision=(await request<{document:Doc}>('documents/'+doc.id+'/revise',{version:confirmed.version,reason:'Se compró una unidad, no una caja de 24.'})).value.document;
+ const corrected=(await request<{document:Doc}>('documents',{id:revision.id,version:revision.version,data:{...revision.data,lines:data.lines}})).value.document;
+ const done=await request<{document:Doc}>('documents/'+revision.id+'/confirm',{version:corrected.version,operationId:crypto.randomUUID()});assert.equal(done.status,200,JSON.stringify(done.value));
+ const original=(await request<{document:Doc}>('documents/'+doc.id)).value.document;assert.equal(original.status,'cancelled');assert.equal(original.data.lines[0].unitsPerPack,'24');
+ assert.equal((await db.prepare('SELECT unit_cost FROM document_products WHERE document_id=?').bind(doc.id).first<{unit_cost:string}>())?.unit_cost,'0.035833');
+ assert.equal((await db.prepare('SELECT unit_cost FROM document_products WHERE document_id=?').bind(revision.id).first<{unit_cost:string}>())?.unit_cost,'0.860000');
+ const history=await request<{history:{documentId:string;unitCost:string}[]}>('history?productId='+product.id);assert.equal(history.value.history.length,1);assert.equal(history.value.history[0].unitCost,'0.860000');
+});
+
+test('columnas de compra y totales neto/bruto llegan al usuario y el método explícito se guarda al confirmar',async()=>{
+ const names=['GOMA FICTICIA DELTA 500G X12','GOMA FICTICIA OMEGA 500G X12','GOMA FICTICIA SIGMA 500G X12'];
+ for(const name of names)await request('products',{name,unitsPerPack:'1',taxRate:'15'});
+ const doc=(await request<{document:Doc}>('documents',{data:blank()})).value.document;
+ const structured={kind:'invoice',supplier:'Proveedor de gomas ficticio',number:'PRECISION-TEST',date:'2026-11-04',taxTotal:'1.25',total:'9.58',taxSummary:[{taxRate:'15',base:'8.33'}],lines:names.map(description=>({description,quantity:'1',unitsPerPack:'12',unitPrice:'2.777',lineTotal:'2.78',grossLineTotal:'3.19',taxRate:'15',purchaseColumns:{unitLabel:'',boxes:'0',units:'1',total:'1',packEvidence:''}}))};
+ const response=await request<ExtractReply>('ai/extract-document',{documentId:doc.id,version:doc.version,structured});assert.equal(response.status,200);const data=response.value.extracted;assert.equal(data.lines.length,3);assert.ok(data.lines.every(line=>line.unitsPerPack==='1'&&line.grossLineTotal==='3.19'&&line.purchaseReading?.boxes==='0'));assert.equal(validateInvoice(data).precisionSuggestion,true);
+ const accepted=applyDocumentPrecision(data),saved=(await request<{document:Doc}>('documents',{id:doc.id,version:doc.version,data:accepted})).value.document;
+ const done=await request<{document:Doc}>('documents/'+doc.id+'/confirm',{version:saved.version,operationId:crypto.randomUUID()});assert.equal(done.status,200,JSON.stringify(done.value));assert.equal(done.value.document.data.netRounding,'document');assert.equal(done.value.document.data.lines[0].unitPrice,'2.777');assert.equal(done.value.document.data.lines[0].purchaseReading?.unitsPerPack,'12');
+ const costs=(await db.prepare('SELECT unit_cost FROM document_products WHERE document_id=? ORDER BY line_id').bind(doc.id).all<{unit_cost:string}>()).results;assert.equal(costs.length,3);assert.equal(costs.reduce((sum,row)=>sum+BigInt(row.unit_cost.replace('.','')),0n),9580000n);
 });

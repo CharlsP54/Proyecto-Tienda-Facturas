@@ -1,3 +1,4 @@
+import {completeProductFixture} from './fixtures/products.ts';
 import {test,before,after} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
@@ -14,7 +15,7 @@ const network:typeof fetch=async(input,init)=>{requests++;assert.match(String(in
  if(!String(input).includes(':generateContent'))return new Response(JSON.stringify({name:'models/'+lastModel}));
  if(pauseGeneration)await pauseGeneration();const body=JSON.parse(String(init?.body)),sample=atob(body.contents[0].parts[1].inlineData.data).includes('EJEMPLO FICTICIO');
  return new Response(JSON.stringify(overloaded?{error:{message:'High demand '+fakeKey}}:sample?twoProductResponse():invoiceResponse()),{status:overloaded?503:quota?429:200});};
-async function call<T=Record<string,unknown>>(path:string,payload?:unknown,cookie=ownerCookie){
+async function call<T=Record<string,unknown>>(path:string,payload?:unknown,cookie=ownerCookie){if(path==='/api/products'&&payload!==undefined)payload=completeProductFixture(payload);
  const response=await fetch(application.url+path,{headers:{cookie,...(payload===undefined?{}:{origin:application.url,'content-type':'application/json'})},...(payload===undefined?{}:{method:'POST',body:JSON.stringify(payload)})});return {status:response.status,value:await response.json() as T,headers:response.headers};
 }
 const blank=():InvoiceInput=>({kind:'invoice',supplier:'',number:'',date:'',seller:'',relatedId:'',discount:'',rounding:'line',taxTotal:'',total:'',notes:'',lines:[]});

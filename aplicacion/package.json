@@ -14,7 +14,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "node scripts/db-migrate-local.mjs",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
-    "test:unit": "node --experimental-strip-types --test tests/calculations.test.ts tests/tax-distribution.test.ts tests/ocr.test.ts tests/document-reader.test.ts tests/reading-session.test.ts tests/gemini.test.ts",
+    "test:unit": "node --experimental-strip-types --test tests/calculations.test.ts tests/tax-distribution.test.ts tests/purchase-reading.test.ts tests/ocr.test.ts tests/document-reader.test.ts tests/reading-session.test.ts tests/gemini.test.ts",
     "test:server": "node --experimental-strip-types --test tests/server.test.ts tests/extraction-server.test.ts",
     "test:capacity": "node --experimental-strip-types --test tests/capacity.test.ts tests/server-capacity.test.ts",
     "typecheck": "tsc --noEmit",

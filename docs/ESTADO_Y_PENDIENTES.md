@@ -1,6 +1,18 @@
 # Estado Actual y Hoja de Ruta Viva
 
-## Actualización vigente · 03/11/2026 · programa autónomo local
+## Actualización vigente · 04/11/2026 · programa autónomo local
+
+**Revisión general de fichas y costos:** la migración 0008 conserva un tipo de presentación explícito. Una ficha sin unidad, categoría, presentación o contenido necesario queda pendiente; tampoco publica costos de una conversión antigua que contradiga UNI. La protección se aplica a catálogo, proveedores, historial y confirmación. Los contenidos explícitos se contrastan con la ficha y los encadenamientos ambiguos no se resuelven escogiendo un número. Gemini y OCR proponen datos para revisión, sin modificar cantidades recibidas a partir del contenido. Ver [alcance y verificación](REVISION_PRODUCTOS_2026-11-04.md).
+
+**Consulta diaria:** costos con hasta tres decimales, precisión completa conservada y referencias cero descartadas. Proveedores, compras y edición se abren en paneles flotantes que pueden minimizarse y cerrarse, manteniendo visible la lista. Los cambios sin guardar tienen aviso y abrir ayuda conserva la ficha en edición.
+
+**Entrega comprobada:** actualización instalada y funcionando localmente; 143 pruebas generales y 11 locales aprobadas. Se completaron la funda de 24 chupetes, la cajita de ocho sobres y la maicena individual ya confirmadas. Facturas, filas de costos, cuentas, configuración y originales permanecen intactos. Las demás fichas incompletas y conversiones históricas dudosas requieren revisión antes de volver a usarse como referencias.
+
+**Visibilidad de costos:** el catálogo muestra presentación y unidad interior en columnas independientes tanto para compra como para venta sugerida, con importes grandes y unidad visible. La mejora fue revisada visualmente con datos ficticios y conserva los cálculos y datos anteriores.
+
+**Cantidades, presentación y venta por partes:** la lectura prioriza UNI/UN y las columnas Caj./Uni./T.Cant. Un X12, X24 o X144 del nombre nunca completa la conversión de recepción. Una conversión ambigua queda pendiente. El detalle conserva las columnas y el factor leídos. Productos incorpora búsqueda por categoría, filtro y orden por compra más reciente, alta reciente o nombre. La ficha puede definir ocho sobres por cajita y mostrar ambos costos, conservando el costo histórico por cajita. Migración aditiva 0007 y respaldos retrocompatibles. Ver [verificación y alcance](CANTIDADES_Y_COSTOS_2026-11-04.md).
+
+**Precisión del proveedor:** se distinguen SUBTOTAL neto y TOTAL con IVA por fila. Para precios como 2,777 existe un método explícito de precisión hasta el subtotal por tarifa; solo se propone cuando reproduce todos los importes y conserva los centavos pagados. No aplica tolerancias ni cambia los precios impresos.
 
 **IVA mixto por bases impresas:** lectura de subtotales por tarifa desde Gemini, texto/PDF local y XML cuando la tarifa está explícita; contraste exacto por grupo y propuesta de reparto único con aceptación, lectura anterior conservada, explicación y deshacer/rehacer. La ambigüedad no se resuelve por categoría ni con el IVA total aislado. Una lectura local de subtotales puede conservar los renglones ya revisados. Ver [evidencia y límites](IVA_MIXTO_2026-11-03.md).
 

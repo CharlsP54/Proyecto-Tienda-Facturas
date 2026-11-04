@@ -1,3 +1,4 @@
+import {completeProductFixture} from './fixtures/products.ts';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
@@ -20,6 +21,7 @@ const data = (extra: Partial<InvoiceInput> = {}): InvoiceInput => ({
   ...extra,
 });
 async function call(path: string, payload?: unknown, identity: Identity | null = owner, bindings = env()) {
+  if(path==='products'&&payload!==undefined)payload=completeProductFixture(payload);
   const req = new Request('https://tienda.test/api/' + path, payload === undefined ? {} : { method: 'POST', headers: { origin: 'https://tienda.test', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
   const response = await handleApi(req, bindings, identity); const raw = await response.text();
   let parsed: JsonRecord | string; try { parsed = JSON.parse(raw) as JsonRecord; } catch { parsed = raw; }

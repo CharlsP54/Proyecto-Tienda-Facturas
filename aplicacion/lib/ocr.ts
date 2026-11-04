@@ -1,4 +1,4 @@
-import { deriveExtractedUnitPrice, multiplyExtractedAmount, parsePrintedTaxSummary, type PrintedTaxGroup } from './calculations.ts';
+import { deriveExtractedUnitPrice, multiplyExtractedAmount, parsePrintedTaxSummary, resolvePurchaseColumns, innerUnitCount, type PrintedTaxGroup, type PurchaseColumns, type PurchaseReading } from './calculations.ts';
 
 export type ExtractedLineData = {
   id: string; supplierCode: string; description: string; quantity: string; unitPrice: string;
@@ -7,6 +7,9 @@ export type ExtractedLineData = {
   sourceText: string; taxAmount?: string; otherTax?: string; otherTaxInBase?: boolean;
   matchSource?: 'learned_code' | 'learned_description' | 'catalog' | 'new'; productId?: string;
   suggestedProductId?: string;
+  purchaseColumns?:PurchaseColumns;purchaseReading?:PurchaseReading;grossLineTotal?:string;
+  costUnit?:string;contentsMode?:'single'|'multiple'|'';innerUnits?:string;innerUnitLabel?:string;
+  contentWarning?:string;
 };
 export type FullExtractionData = {
   kind?: 'invoice' | 'delivery' | 'order'; supplier?: string; supplierRuc?: string;
@@ -43,6 +46,25 @@ export function suggestCategory(description:string):string {
 export function isExplicitPromotion(description:string,total:string):boolean {
  return /\bpromo(?:cion)?\b|bonificacion|gratis/.test(norm(description))&&/^0(?:[.,]0+)?$/.test(total);
 }
+/** Solo sugiere un contenido interior con rótulo inequívoco; la persona debe guardarlo en el catálogo. */
+export function suggestInnerContents(description:string){
+ const match=norm(description).match(/\b(cajita|caja|display|paquete|funda)\s+(?:x\s*|de\s+|con\s+)?(\d{1,6})\s*(sobres?|botellas?|fundas?|unidades?|piezas?|chupetes?|caramelos?|galletas?|tabletas?|sachets?)\b/);if(!match)return null;
+ return {costUnit:match[1],quantity:match[2],unitLabel:match[3]==='unidades'?'unidad':match[3].replace(/s$/,'')};
+}
+/** Propuesta de contenido explícito: nunca se utiliza como factor de recepción ni oculta contradicciones. */
+export function productReadingDetails(line:ExtractedLineData):Partial<ExtractedLineData>{
+ const proposed=suggestInnerContents(line.description)||suggestInnerContents(line.sourceText);if(!proposed){
+  const chained=/\b\d+\s*[x×]\s*\d+/i.test(line.description)&&!/[x×]\s*\d+\s*(?:cm|mm|metros?)\b/i.test(line.description);
+  if(chained||line.contentsMode==='multiple')return {contentsMode:'',innerUnits:'',innerUnitLabel:'',contentWarning:'El contenido no tiene un nivel de empaque inequívoco. Una cadena como 24X28 no indica cuál cifra corresponde a la funda; confirma el contenido antes de publicar.'};
+  return /^(?:un|uni|und|u)$/i.test(line.costUnit||'')?{costUnit:'unidad'}:{};
+ }
+ const unit=line.costUnit?.trim()||'',generic=/^(?:un|uni|und|u|unidad(?:es)?)$/i.test(unit),columns=line.purchaseColumns;
+ const unitReceipt=columns&&(/^(?:un|uni|und|u|unidad(?:es)?)$/i.test(columns.unitLabel.trim())||columns.boxes==='0'&&!!columns.units);
+ let count='';try{count=innerUnitCount(line.innerUnits||'');}catch{count='invalid';}
+ if(count&&count!==proposed.quantity||line.contentsMode==='single'||unit&&!generic&&norm(unit)!==proposed.costUnit)return {contentsMode:'',innerUnits:'',innerUnitLabel:'',contentWarning:'El contenido leído contradice la presentación explícita del nombre. Confirma la unidad comprada y su contenido; no se eligió una cifra para completar el producto.'};
+ if((!unit||generic)&&!unitReceipt)return {costUnit:'',contentsMode:'multiple',innerUnits:line.innerUnits||proposed.quantity,innerUnitLabel:line.innerUnitLabel||proposed.unitLabel,contentWarning:'Se identificó contenido interior, pero falta comprobar qué presentación corresponde al precio.'};
+ return {costUnit:!unit||generic?proposed.costUnit:unit,contentsMode:'multiple',innerUnits:line.innerUnits||proposed.quantity,innerUnitLabel:line.innerUnitLabel||proposed.unitLabel,contentWarning:'Contenido propuesto desde un rótulo explícito: '+proposed.quantity+' '+proposed.unitLabel+' por '+proposed.costUnit+'. Revisa la presentación; no cambia las unidades recibidas.'};
+}
 export function extractSuggestions(text:string):RecognitionResult['suggestions'] {
   const out:RecognitionResult['suggestions']={}; const textLines=text.replace(/\r/g,'').split('\n');
   const n=textLines.join('\n');
@@ -73,9 +95,11 @@ export function extractSuggestions(text:string):RecognitionResult['suggestions']
   return out;
 }
 
-type Col='code'|'barcode'|'quantity'|'description'|'price'|'discount'|'percent'|'tax'|'total'|'unit'|'category'|'pvp'|'netprice'|'unitDiscount'|'other';
+type Col='code'|'barcode'|'quantity'|'description'|'price'|'discount'|'percent'|'tax'|'total'|'unit'|'category'|'pvp'|'netprice'|'unitDiscount'|'other'|'boxes'|'looseUnits'|'totalQuantity'|'packFactor'|'netTotal'|'grossTotal';
 function column(s:string):Col {
  const n=norm(s).replace(/[.]/g,'');
+ if(/^caj(?:a|as)?$/.test(n.trim()))return 'boxes';if(/^(?:uni|uds|unidades sueltas)$/.test(n.trim()))return 'looseUnits';if(/^t\s*cant|total\s*cant|cant.*total/.test(n))return 'totalQuantity';
+ if(/fraccion|unid.*(?:por|x|\/)\s*(?:caj|pac|paq|disp)|factor|conversion/.test(n))return 'packFactor';if(/subtotal|sub total/.test(n))return 'netTotal';
  if(/pvp/.test(n))return 'pvp';if(/barras|auxiliar/.test(n))return 'barcode';
  if(/codigo|^cod\b/.test(n))return 'code';if(/cant|^qty|^unid.*comprad/.test(n))return 'quantity';
  if(/descrip|producto|articulo|detalle/.test(n))return 'description';if(/categoria/.test(n))return 'category';
@@ -103,7 +127,7 @@ export function arrangeOcrTsv(tsv: string): string {
   return (gap>Math.max(12,row.height*0.8)?'\t':' ')+word.text;
  }).join('')).join('\n');
 }
-function emptyLine(index:number,raw:string):ExtractedLineData {return {id:`line-${index+1}`,supplierCode:'',description:'',quantity:'',unitPrice:'',discountPercent:'',discountAmount:'',taxRate:'',lineTotal:'',unitsPerPack:'',bonusQuantity:'',promotion:false,category:'',sourceText:raw};}
+function emptyLine(index:number,raw:string):ExtractedLineData {return {id:`line-${index+1}`,supplierCode:'',description:'',quantity:'',unitPrice:'',discountPercent:'',discountAmount:'',taxRate:'',lineTotal:'',unitsPerPack:'',bonusQuantity:'',promotion:false,category:'',sourceText:raw,purchaseColumns:{unitLabel:'',boxes:'',units:'',total:'',packEvidence:''}};}
 
 export function extractDocumentData(text:string):FullExtractionData {
  if(typeof text!=='string'||text.length>500000)throw new Error('El texto excede el límite de lectura. Divide el documento en archivos más pequeños.');
@@ -117,15 +141,16 @@ export function extractDocumentData(text:string):FullExtractionData {
  const headerIndex=rows.findIndex(l=>(norm(l).match(/cantidad|\bcant\b|codigo|descrip|producto|articulo|precio|unitario|\btotal\b/g)||[]).length>=3);
  const header=headerIndex>=0?rows[headerIndex]:''; const cols=splitCells(header).map(column);
  if(/lista/i.test(header)&&cols.filter(c=>c==='price').length>1)cols[cols.lastIndexOf('price')]='netprice';
- const structured=cols.length>=4&&cols.includes('description')&&cols.includes('quantity')&&cols.includes('price');
+ if(cols.includes('netTotal'))cols.forEach((col,index)=>{if(col==='total')cols[index]='grossTotal';});
+ const structured=cols.length>=4&&cols.includes('description')&&cols.some(col=>['quantity','looseUnits','totalQuantity'].includes(col))&&cols.includes('price');
  const profile=/p\.?\s*v\.?\s*p/i.test(header)?'pvp':/lista|%\s*d(?:esc|scto)/i.test(header)?'list':'standard';
  const start=headerIndex>=0?headerIndex+1:0;
  for(let i=start;i<rows.length;i++){
    const raw=rows[i];if(/^(?:subtotal|sub\s*total|base\b|iva\b|i\.v\.a|total\b|suman\b|valor\s+a\s+pagar|son\b|observaci[oó]n|autorizaci[oó]n|informaci[oó]n\s+adicional|forma\s+de\s+pago)/i.test(raw))break;
    if(/^(?:R\.?U\.?C|fecha|cliente|direcci[oó]n|tel[eé]fono|vendedor|p[aá]gina|factura|pedido|nota\s+de\s+entrega)\b/i.test(raw))continue;
-   const line=emptyLine(out.lines.length,raw);const cells=splitCells(raw);
+   const line=emptyLine(out.lines.length,raw);const cells=splitCells(raw.replace(/^\*\s*/,''));
    if(structured&&cells.length===cols.length){
-     cols.forEach((c,j)=>{const v=cells[j];switch(c){case 'code':line.supplierCode=v;break;case 'quantity':line.quantity=numeric(v);break;case 'description':line.description=v;break;case 'price':line.unitPrice=numeric(v);break;case 'discount':line.discountAmount=numeric(v);break;case 'unitDiscount':break;case 'percent':line.discountPercent=numeric(v.replace('%',''));break;case 'tax':line.taxRate=numeric(v.replace('%',''));break;case 'total':line.lineTotal=numeric(v);break;case 'unit':{const bought=v.match(/^(\d+(?:[.,]\d+)?)\s+(UN|UNI|UND|DP|CJ|CAJA|PAQ)\b/i);if(bought)line.quantity=numeric(bought[1]);if(/^(?:UN|UNI|UND|UNIDAD(?:ES)?)$/i.test(v)||bought&&/^(UN|UNI|UND)$/i.test(bought[2]))line.unitsPerPack='1';break;}case 'category':line.category=v;break;}});
+     cols.forEach((c,j)=>{const v=cells[j];switch(c){case 'code':line.supplierCode=v;break;case 'quantity':line.quantity=numeric(v);break;case 'boxes':line.purchaseColumns!.boxes=numeric(v);break;case 'looseUnits':line.purchaseColumns!.units=numeric(v);break;case 'totalQuantity':line.purchaseColumns!.total=numeric(v);line.quantity=numeric(v);break;case 'packFactor':{const amount=v.match(/^\d+(?:[.,]\d+)?/);if(amount){line.unitsPerPack=numeric(amount[0]);line.purchaseColumns!.packEvidence=splitCells(header)[j]+': '+v;}break;}case 'description':line.description=v;break;case 'price':line.unitPrice=numeric(v);break;case 'discount':line.discountAmount=numeric(v);break;case 'unitDiscount':break;case 'percent':line.discountPercent=numeric(v.replace('%',''));break;case 'tax':line.taxRate=numeric(v.replace('%',''));break;case 'total':case 'netTotal':line.lineTotal=numeric(v);break;case 'grossTotal':line.grossLineTotal=numeric(v);break;case 'unit':{const bought=v.match(/^(\d+(?:[.,]\d+)?)\s+(UN|UNI|UND|DP|CJ|CAJA|PAQ)\b/i);if(bought)line.quantity=numeric(bought[1]);line.purchaseColumns!.unitLabel=bought?.[2]||v;if(/^(?:UN|UNI|UND|UNIDAD(?:ES)?)$/i.test(v)||bought&&/^(UN|UNI|UND)$/i.test(bought[2]))line.unitsPerPack='1';break;}case 'category':line.category=v;break;}});
      const unitDiscount=cols.indexOf('unitDiscount');if(unitDiscount>=0)line.discountAmount=multiplyExtractedAmount(numeric(cells[unitDiscount]),line.quantity);
    }else{
      const tokens=raw.replace(/\s*\|\s*/g,' ').split(/\s+/);let end=tokens.length-1;const nums:string[]=[];
@@ -138,9 +163,9 @@ export function extractDocumentData(text:string):FullExtractionData {
      else if(isCode(rest[0])){line.supplierCode=rest[0];begin=1;if(/^\d{13}$/.test(rest[1]||''))begin=2;if(isQty(rest[begin]))line.quantity=numeric(rest[begin++]);}
      let description=rest.slice(begin).join(' ');
      const qUnit=description.match(/\s(\d+(?:[.,]\d+)?)\s+(UN|UNI|UND|DP|CJ|CAJA|PAQ)\b(.*)$/i);
-     if(!line.quantity&&qUnit){line.quantity=numeric(qUnit[1]);description=description.slice(0,qUnit.index);if(/^(?:UN|UNI|UND)$/i.test(qUnit[2]))line.unitsPerPack='1';}
+     if(!line.quantity&&qUnit){line.quantity=numeric(qUnit[1]);line.purchaseColumns!.unitLabel=qUnit[2];description=description.slice(0,qUnit.index);if(/^(?:UN|UNI|UND)$/i.test(qUnit[2]))line.unitsPerPack='1';}
      const explicitTax=description.match(/\s(\d{1,2}(?:[.,]\d+)?)\s+(UN|UNI|UND)$/i);
-     if(explicitTax){line.taxRate=numeric(explicitTax[1]);line.unitsPerPack='1';description=description.slice(0,explicitTax.index);}
+     if(explicitTax){line.taxRate=numeric(explicitTax[1]);line.unitsPerPack='1';line.purchaseColumns!.unitLabel=explicitTax[2];description=description.slice(0,explicitTax.index);}
      line.description=description.trim();line.lineTotal=numeric(nums.at(-1)||'');
      const pct=nums.find(v=>v.endsWith('%'));if(pct)line.taxRate=numeric(pct.slice(0,-1));
      const values=nums.filter(v=>!v.endsWith('%')).map(numeric);
@@ -153,7 +178,8 @@ export function extractDocumentData(text:string):FullExtractionData {
    if(!line.description||!/[A-Za-zÁÉÍÓÚÑáéíóúñ]/.test(line.description)||!line.lineTotal)continue;
    // Un RUC, una dirección o un pie de página con números no son productos.
    if(!line.quantity&&!line.unitPrice)continue;
-   if(!line.unitsPerPack){const pack=line.description.match(/\b(?:caja|paquete|paca|display|funda)\s*(?:de\s*)?(?:x\s*)?(\d{1,3})\b/i)||line.description.match(/\bx\s*(\d{1,3})\b/i);if(pack)line.unitsPerPack=pack[1];}
+   const purchase=resolvePurchaseColumns(line.quantity,line.unitsPerPack,line.purchaseColumns!);Object.assign(line,purchase);
+   Object.assign(line,productReadingDetails(line));if(line.contentWarning)warnings.push(`Producto ${out.lines.length+1}: ${line.contentWarning}`);
    if(!line.category)line.category=suggestCategory(line.description);
    if(isExplicitPromotion(line.description,line.lineTotal)){line.promotion=true;warnings.push(`Producto ${out.lines.length+1}: el documento lo rotula como promoción; revisa su relación y asignación de costo.`);}
    if(line.category)warnings.push(`Producto ${out.lines.length+1}: categoría sugerida por descripción; revísala.`);

@@ -25,7 +25,7 @@ test('OCR extracts wordsTotal when legible in words line', () => {
   assert.equal(result.total, '12.24');
 });
 
-test('extractDocumentData parses table lines, supplier RUC and packaging clues', () => {
+test('extractDocumentData conserva cantidades y nombres sin convertir X12 o X24 en recepción', () => {
   const invoiceSample = `
 DISTRIBUIDORA ROGUIZAM S.A.
 RUC: 0992384729001
@@ -58,7 +58,7 @@ SON: CUATRO CON 56/100
   assert.equal(result.lines[0].description, 'GALLETA OREO PAQUETE X12');
   assert.equal(result.lines[0].unitPrice, '0.8600');
   assert.equal(result.lines[0].lineTotal, '3.38');
-  assert.equal(result.lines[0].unitsPerPack, '12');
+  assert.equal(result.lines[0].unitsPerPack, '');
 
   // Line 2
   assert.equal(result.lines[1].quantity, '2');
@@ -66,7 +66,7 @@ SON: CUATRO CON 56/100
   assert.equal(result.lines[1].description, 'WAFER VAINILLA X24');
   assert.equal(result.lines[1].unitPrice, '0.2900');
   assert.equal(result.lines[1].lineTotal, '0.58');
-  assert.equal(result.lines[1].unitsPerPack, '24');
+  assert.equal(result.lines[1].unitsPerPack, '');
 });
 
 test('extractDocumentData identifies delivery notes without turning them into tax invoices', () => {
@@ -87,5 +87,5 @@ TOTAL: 3.72
   assert.equal(result.supplier, 'COMERCIALIZADORA COILE');
   assert.equal(result.lines.length, 2);
   assert.equal(result.lines[0].description, 'CANELA ENTERA X20');
-  assert.equal(result.lines[0].unitsPerPack, '20');
+  assert.equal(result.lines[0].unitsPerPack, '');
 });

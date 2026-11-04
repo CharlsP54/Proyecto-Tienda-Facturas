@@ -1,2 +1,2 @@
 @echo off
-call "C:\Users\Carlos Ponce\AppData\Local\MiTiendaPrograma\20261104033702191\DETENER_MI_TIENDA.cmd"
+call "C:\Users\Carlos Ponce\AppData\Local\MiTiendaPrograma\20261104192600036\DETENER_MI_TIENDA.cmd"
