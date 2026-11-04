@@ -1,0 +1,13 @@
+import {cp,mkdir,readFile,writeFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+import {homedir} from 'node:os';
+const workspace=fileURLToPath(new URL('../../',import.meta.url)),source=path.join(workspace,'MI_TIENDA_LOCAL');
+const version=JSON.parse(await readFile(path.join(source,'version.json'),'utf8'));
+if(version.application!=='mi-tienda-local'||typeof version.builtAt!=='string')throw new Error('Primero prepara el paquete local.');
+const build=version.builtAt.replace(/[^0-9]/g,'');if(build.length<14)throw new Error('Versión inválida.');
+const programRoot=path.resolve(process.env.LOCALAPPDATA||path.join(homedir(),'.local','share'),'MiTiendaPrograma'),destination=path.resolve(programRoot,build);
+if(path.dirname(destination)!==programRoot)throw new Error('Destino de instalación inválido.');
+await mkdir(destination,{recursive:true});await cp(source,destination,{recursive:true});
+for(const name of ['INICIAR_MI_TIENDA.cmd','DETENER_MI_TIENDA.cmd'])await writeFile(path.join(workspace,name),'@echo off\r\ncall "'+path.join(destination,name)+'"\r\n','utf8');
+console.log('Programa instalado fuera de OneDrive: '+destination);console.log('Los datos permanecen separados en la carpeta MiTienda del mismo usuario.');

@@ -1,0 +1,55 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1793723121569,
+      "tag": "0000_careless_supernaut",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793723699235,
+      "tag": "0001_even_beast",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793727473585,
+      "tag": "0002_tiny_gressill",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793730193133,
+      "tag": "0003_cold_morbius",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1793743995693,
+      "tag": "0004_lively_winter_soldier",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793751973670,
+      "tag": "0005_brave_richard_fisk",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793758377087,
+      "tag": "0006_cultured_professor_monster",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+import {test,before,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,dirname,resolve} from 'node:path';
+import {startLocalServer} from '../local/server.ts';
+import {similarProducts,type purchaseSummary} from '../lib/catalog.ts';
+import type {InvoiceInput} from '../lib/calculations.ts';
+import {fakeKey,invoiceResponse} from './fixtures/gemini.ts';
+
+type Doc={id:string;version:number;status:string;data:InvoiceInput};
+type Product={id:string;name:string;salePrice:string;purchase:ReturnType<typeof purchaseSummary>};
+let app:Awaited<ReturnType<typeof startLocalServer>>,directory:string,cookie='',firstId='',secondId='',requestBody='',suggestedId='';
+const mock:typeof fetch=async(input,init)=>{if(!String(input).includes(':generateContent'))return new Response('{}');requestBody=String(init?.body);const response=invoiceResponse(),data=JSON.parse(response.candidates[0].content.parts[0].text);data.supplier='Proveedor Gemini';data.lines[0].description='REFRESCO PERSONAL';data.lines[0].supplierCode='';data.lines[0].suggestedProductId=suggestedId;response.candidates[0].content.parts[0].text=JSON.stringify(data);return new Response(JSON.stringify(response));};
+async function api<T=Record<string,unknown>>(path:string,body?:unknown){const response=await fetch(app.url+'/api/'+path,{headers:{cookie,...(body===undefined?{}:{origin:app.url,'content-type':'application/json'})},...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)})});return {status:response.status,value:await response.json() as T};}
+function input(extra:Partial<InvoiceInput>={}):InvoiceInput{return {kind:'invoice',supplier:'Proveedor Alfa',number:crypto.randomUUID(),date:'2026-11-01',seller:'Ana',relatedId:'',discount:'',rounding:'line',taxTotal:'0.15',total:'1.15',notes:'',lines:[{id:crypto.randomUUID(),productId:firstId,description:'BEBIDA COLA BOTELLA 500 ML',quantity:'1',unitsPerPack:'1',unitPrice:'1.00',taxRate:'15',lineTotal:'1.00',taxAmount:'',discountPercent:'',discountAmount:'',bonusQuantity:'',otherTax:'',promotion:false}],...extra};}
+async function save(data:InvoiceInput){const response=await api<{document:Doc}>('documents',{data});assert.equal(response.status,200,JSON.stringify(response.value));return response.value.document;}
+async function confirm(data:InvoiceInput){const doc=await save(data),response=await api<{document:Doc}>(`documents/${doc.id}/confirm`,{version:doc.version,operationId:crypto.randomUUID()});assert.equal(response.status,200,JSON.stringify(response.value));return response.value.document;}
+before(async()=>{directory=await mkdtemp(join(tmpdir(),'tienda-catalog-test-'));await mkdir(join(directory,'client'));await writeFile(join(directory,'client/index.html'),'<html>Prueba</html>');app=await startLocalServer({dataDirectory:join(directory,'data'),clientDirectory:join(directory,'client'),port:0,geminiFetch:mock});const response=await fetch(app.url+'/local/setup',{method:'POST',headers:{origin:app.url,'content-type':'application/json'},body:JSON.stringify({username:'encargado',name:'Prueba catálogo',password:'PruebaCatalogo42'})});cookie=response.headers.get('set-cookie')!.split(';')[0];await api('state');});
+after(async()=>{await app.close();assert.equal(dirname(resolve(directory)),resolve(tmpdir()));assert.ok(directory.includes('tienda-catalog-test-'));await rm(directory,{recursive:true,force:true});});
+
+test('los parecidos se presentan como opciones y conservan tamaño y variante para revisión',()=>{
+ const result=similarProducts('COCA COLA BEBIDA 500ML',[{id:'small',name:'Coca Cola bebida 500 ml',brand:'Coca Cola',content:'500 ml',presentation:'Botella'},{id:'large',name:'Coca Cola bebida 1 litro',brand:'Coca Cola',content:'1 litro',presentation:'Botella'}]);assert.equal(result[0].id,'small');assert.ok(result.every(item=>item.reason.includes('compara')||item.reason.includes('revisa')));assert.equal(result[0].content,'500 ml');
+});
+
+test('un catálogo sin compras conserva venta opcional y no inventa costo ni sugerido',async()=>{
+ firstId=(await api<{product:Product}>('products',{name:'Bebida Cola 500ml',brand:'Marca',content:'500 ml',presentation:'Botella',comparisonUnit:'botella',unitsPerPack:'1',taxRate:'15',salePrice:'2.00'})).value.product.id;
+ secondId=(await api<{product:Product}>('products',{name:'Bebida Cola 1 litro',brand:'Marca',content:'1 litro',presentation:'Botella',unitsPerPack:'1',taxRate:'15'})).value.product.id;
+ const result=await api<{product:Product}>('products/'+firstId);assert.equal(result.value.product.salePrice,'2.00');assert.equal(result.value.product.purchase.status,'none');assert.equal(result.value.product.purchase.unitCost,null);assert.deepEqual(result.value.product.purchase.references.increases,[]);
+});
+test('distintas descripciones y códigos por proveedor conservan un solo artículo y sus compras reales',async()=>{
+ const alpha=input();alpha.lines[0].supplierCode='ALFA-100';await confirm(alpha);
+ const beta=input({supplier:'Proveedor Beta',date:'2026-11-03',seller:'Luis',taxTotal:'0.18',total:'1.38'});beta.lines[0]={...beta.lines[0],description:'GASEOSA COLA PERSONAL 0.5 L',supplierCode:'BETA-888',unitPrice:'1.20',lineTotal:'1.20'};await confirm(beta);
+ const state=await api<{products:Product[]}>('state'),product=state.value.products.find(p=>p.id===firstId)!;assert.equal(state.value.products.length,2);assert.equal(product.purchase.unitCost,'1.380000');assert.equal(product.purchase.supplier,'Proveedor Beta');assert.equal(product.purchase.references.increases.find(p=>p.percent===25)?.price,'1.73');assert.equal(product.purchase.references.belowPaidCost,false);
+ const matches=await api<{matches:{candidates:{id:string;matchSource:string}[]}[]}>('product-matches',{supplier:'Proveedor Beta',lines:[{id:'consulta',description:'GASEOSA COLA PERSONAL 0.5 L',supplierCode:''}]});assert.equal(matches.value.matches[0].candidates[0].id,firstId);assert.equal(matches.value.matches[0].candidates[0].matchSource,'supplier_description');
+ const before=(await app.db.prepare('SELECT COUNT(*) count FROM products').first<{count:number}>())!.count;
+ const proposed=await api<{extracted:InvoiceInput}>('ai/extract-document',{documentId:(await save(input({supplier:'Proveedor Beta'}))).id,version:1,provider:'local',structured:{supplier:'Proveedor Beta',lines:[{description:'GASEOSA COLA PERSONAL 0.5 L',quantity:'1',unitPrice:'1.20',unitsPerPack:'1',taxRate:'15',lineTotal:'1.20'}]}});assert.equal(proposed.status,200);assert.equal(proposed.value.extracted.lines[0].productId,firstId);assert.equal((await app.db.prepare('SELECT COUNT(*) count FROM products').first<{count:number}>())!.count,before);
+});
+test('el mismo código interno de otro proveedor no es una identidad universal',async()=>{
+ await api('supplier-products',{supplierName:'Proveedor Gamma',supplierCode:'ALFA-100',supplierDescription:'Cola grande',productId:secondId});
+ const result=await api<{matches:{candidates:{id:string}[]}[]}>('product-matches',{supplier:'Proveedor Gamma',lines:[{id:'consulta',supplierCode:'ALFA-100',description:'COLA GRANDE'}]});assert.equal(result.value.matches[0].candidates[0].id,secondId);
+});
+test('todos los proveedores registrados aparecen paginados y los comerciales no inventan costos',async()=>{
+ await api('supplier-products',{supplierName:'Proveedor sin compra',supplierCode:'Z100',productId:firstId});await confirm(input({kind:'delivery',supplier:'Proveedor provisional'}));
+ for(let i=0;i<51;i++)await app.db.prepare('INSERT INTO supplier_products(id,supplier_key,supplier_name,supplier_code,supplier_description,product_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').bind('map-'+i,'proveedor extra '+String(i).padStart(2,'0'),'Proveedor extra '+String(i).padStart(2,'0'),'X100','Cola 500',firstId,'2026-11-01','2026-11-01').run();
+ type Suppliers={suppliers:{name:string;purchase:ReturnType<typeof purchaseSummary>;hasCommercial:number;descriptions:string[]}[];pagination:{total:number}};
+ const first=await api<Suppliers>(`products/${firstId}/suppliers`),second=await api<Suppliers>(`products/${firstId}/suppliers?page=2`);assert.equal(first.status,200,JSON.stringify(first.value));assert.equal(first.value.pagination.total,55);assert.equal(first.value.suppliers.length,50);assert.equal(second.value.suppliers.length,5);
+ const rows=[...first.value.suppliers,...second.value.suppliers];assert.equal(new Set(rows.map(r=>r.name)).size,55);assert.equal(rows.find(r=>r.name==='Proveedor Beta')?.purchase.unitCost,'1.380000');assert.ok(rows.find(r=>r.name==='Proveedor Beta')?.descriptions.includes('GASEOSA COLA PERSONAL 0.5 L'));assert.equal(rows.find(r=>r.name==='Proveedor provisional')?.purchase.status,'none');assert.equal(rows.find(r=>r.name==='Proveedor sin compra')?.purchase.unitCost,null);
+});
+test('un borrador comercial con renglón inválido no rompe la consulta de proveedores',async()=>{
+ const data=input({kind:'order',supplier:'Borrador incompleto'});data.lines=['texto pendiente'] as unknown as InvoiceInput['lines'];await save(data);const result=await api<{pagination:{total:number}}>(`products/${firstId}/suppliers`);assert.equal(result.status,200,JSON.stringify(result.value));assert.equal(result.value.pagination.total,55);
+});
+test('la referencia usa fecha del documento, deja empates pendientes y respeta la elección y anulación',async()=>{
+ const old=input({date:'2026-10-01',supplier:'Proveedor antiguo',taxTotal:'0.30',total:'2.30'});old.lines[0].unitPrice='2';old.lines[0].lineTotal='2.00';await confirm(old);
+ assert.equal((await api<{product:Product}>('products/'+firstId)).value.product.purchase.supplier,'Proveedor Beta');
+ const tie=input({date:'2026-11-03',supplier:'Proveedor Alfa'}),doc=await confirm(tie);let product=(await api<{product:Product}>('products/'+firstId)).value.product;assert.equal(product.purchase.status,'ambiguous');assert.equal(product.purchase.unitCost,null);assert.equal(product.purchase.references.increases.length,0);
+ assert.equal((await api('reference-choices',{productId:firstId,documentId:doc.id,lineId:tie.lines[0].id,reason:'Referencia revisada para la tienda'})).status,200);product=(await api<{product:Product}>('products/'+firstId)).value.product;assert.equal(product.purchase.unitCost,'1.150000');
+ assert.equal((await api(`documents/${doc.id}/cancel`,{version:doc.version,reason:'Prueba de regreso al costo anterior'})).status,200);assert.equal((await api<{product:Product}>('products/'+firstId)).value.product.purchase.unitCost,'1.380000');
+});
+test('Gemini solo propone un id existente del catálogo autorizado y no publica precios ni vincula por su cuenta',async()=>{
+ await api('ai/config',{provider:'gemini',model:'gemini-3.5-flash-lite',apiKey:fakeKey});const doc=await save(input({supplier:'Proveedor Gemini'})),form=new FormData();form.set('documentId',doc.id);form.set('file',new File([new Uint8Array([37,80,68,70,45,49,46,55])],'prueba.pdf',{type:'application/pdf'}));const uploaded=await (await fetch(app.url+'/api/upload',{method:'POST',headers:{origin:app.url,cookie},body:form})).json() as {file:{id:string};document:Doc};suggestedId=firstId;
+ const payload={documentId:doc.id,version:uploaded.document.version,fileIds:[uploaded.file.id],provider:'gemini',consent:true};
+ const result=await api<{extracted:InvoiceInput}>('ai/extract-document',{...payload,catalogConsent:true});assert.equal(result.status,200,JSON.stringify(result.value));assert.equal(result.value.extracted.lines[0].productId,'');assert.equal(result.value.extracted.lines[0].productCandidates?.[0].id,firstId);assert.equal(result.value.extracted.lines[0].productCandidates?.[0].matchSource,'gemini');
+ const sent=JSON.parse(requestBody),context=sent.contents[0].parts.find((p:{text?:string})=>p.text?.startsWith('Catálogo autorizado'));assert.ok(context);assert.ok(!context.text.includes('salePrice'));assert.ok(!context.text.includes('sale_price'));assert.ok(!context.text.includes('unitCost'));
+ const noCatalog=await api<{extracted:InvoiceInput}>('ai/extract-document',{...payload,catalogConsent:false});assert.equal(noCatalog.value.extracted.lines[0].productCandidates?.some(p=>p.matchSource==='gemini'),false);assert.ok(!JSON.parse(requestBody).contents[0].parts.some((p:{text?:string})=>p.text?.startsWith('Catálogo autorizado')));
+ const saved=await api<{document:Doc}>('documents',{id:doc.id,version:uploaded.document.version,data:result.value.extracted});const line=result.value.extracted.lines[0];
+ assert.equal((await api('products',{id:'auto-duplicate-test',sourceDocumentId:doc.id,sourceLineId:line.id,sourceVersion:saved.value.document.version,name:line.description,unitsPerPack:'1',taxRate:'15'})).status,409);
+ assert.equal(await app.db.prepare("SELECT id FROM products WHERE id='auto-duplicate-test'").first(),null);
+});
+test('las vinculaciones por descripción sobreviven respaldo y las copias anteriores siguen siendo compatibles',async()=>{
+ const backup=(await api<{data:{product_aliases:Record<string,unknown>[]}}>('backup')).value;assert.ok(backup.data.product_aliases.length>=2);
+ for(const legacy of [false,true]){const restored=await startLocalServer({dataDirectory:join(directory,legacy?'legacy':'restored'),clientDirectory:join(directory,'client'),port:0});try{const setup=await fetch(restored.url+'/local/setup',{method:'POST',headers:{origin:restored.url,'content-type':'application/json'},body:JSON.stringify({username:'encargado',name:'Restauración',password:'Restauracion42'})}),session=setup.headers.get('set-cookie')!.split(';')[0],headers={cookie:session,origin:restored.url,'content-type':'application/json'};await fetch(restored.url+'/api/state',{headers});const copy=structuredClone(backup);if(legacy)delete (copy.data as Record<string,unknown>).product_aliases;const response=await fetch(restored.url+'/api/restore',{method:'POST',headers,body:JSON.stringify({backup:copy})});assert.equal(response.status,200,await response.text());const count=await restored.db.prepare('SELECT COUNT(*) count FROM product_aliases').first<{count:number}>();if(legacy)assert.ok((count?.count||0)>0);else assert.equal(count?.count,backup.data.product_aliases.length);}finally{await restored.close();}}
+});

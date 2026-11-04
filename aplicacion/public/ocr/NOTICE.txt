@@ -1,0 +1,3 @@
+Lectura local: tesseract.js 6.0.1 (Apache-2.0), tesseract.js-core, modelo spa de tessdata.projectnaptha.com/4.0.0.
+Modelo SHA-256: 6cd52c545bceeacb2e43fad64fc0703a711c482ba20d1ca4b6915c09de9973e6
+No se envían imágenes a estos proveedores.

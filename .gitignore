@@ -1,0 +1,49 @@
+# Documentos reales, facturas originales y muestras privadas
+/muestras/
+/datos/
+/backups/
+/uploads/
+/storage/
+/data/
+
+# Archivos comprimidos pesados y paquetes generados
+*.tar.gz
+*.zip
+*.tgz
+/MI_TIENDA_LOCAL/
+/mi-tienda-local.zip
+/migracion/
+/outputs/
+
+# Credenciales, claves y variables de entorno locales
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.cert
+*.secret
+
+# Dependencias y estados de compilación
+node_modules/
+dist/
+dist-local/
+.next/
+.vinext/
+out/
+.wrangler/
+.sites-runtime/
+__pycache__/
+.venv/
+*.tsbuildinfo
+
+# Registros y archivos del sistema operativo
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.DS_Store
+Thumbs.db
